@@ -45,7 +45,9 @@ impl EGraph {
                     return vec![];
                 }
                 assert!(func.schema.output.is_eq_sort());
+                debug_assert!(func.nodes.stabilized());
                 func.nodes
+                    .stable
                     .iter()
                     .filter_map(move |(inputs, output)| {
                         (output == output_value).then(|| {
@@ -119,7 +121,8 @@ impl<'a> Extractor<'a> {
             for &sym in &self.ctors {
                 let func = &self.egraph.functions[&sym];
                 if func.schema.output.is_eq_sort() {
-                    for (inputs, output) in &func.nodes {
+                    debug_assert!(func.nodes.stabilized());
+                    for (inputs, output) in &func.nodes.stable {
                         if let Some(new_cost) = self.node_total_cost(func, inputs) {
                             let make_new_pair = || (new_cost, Node { sym, inputs });
 

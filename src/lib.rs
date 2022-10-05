@@ -37,8 +37,48 @@ use crate::typecheck::TypeError;
 pub struct Function {
     decl: FunctionDecl,
     schema: ResolvedSchema,
-    nodes: HashMap<Vec<Value>, Value>,
+    nodes: FunctionData,
     updates: usize,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct FunctionData {
+    stable: HashMap<Vec<Value>, Value>,
+    recent: HashMap<Vec<Value>, Value>,
+    staging: Vec<(Vec<Value>, Value)>,
+}
+
+impl FunctionData {
+    /// Whether there are any pending additions to FunctionData.
+    ///
+    /// We have this function around to catch bugs where queries are made
+    /// against a function that assumes all tuples it owns reside in `stable`.
+    pub(crate) fn stabilized(&self) -> bool {
+        self.recent.is_empty() && self.staging.is_empty()
+    }
+    pub(crate) fn get(&self, args: &[Value]) -> Option<&Value> {
+        self.stable.get(args)
+    }
+    pub(crate) fn insert(&mut self, args: Vec<Value>, ret: Value) -> Option<Value> {
+        self.stable.insert(args, ret)
+    }
+    pub(crate) fn remove(&mut self, args: &[Value]) -> Option<Value> {
+        assert!(self.stabilized());
+        self.stable.remove(args)
+    }
+    pub(crate) fn len(&self) -> usize {
+        assert!(self.stabilized());
+        self.stable.len()
+    }
+    pub(crate) fn clear(&mut self) {
+        self.stable.clear();
+        self.recent.clear();
+        self.staging.clear();
+    }
+    // do not submit
+    // pub(crate) fn iter_all(&self) -> impl Iterator<Item=(&Vec<Value>, &Value)> {
+    //     self.stable.iter().chain(self.recent.iter()).chain(self.staging.iter()
+    // }
 }
 
 #[derive(Clone, Debug)]
@@ -52,7 +92,7 @@ impl Function {
         // FIXME this doesn't compute updates properly
         let n_unions = uf.n_unions();
         let old_nodes = std::mem::take(&mut self.nodes);
-        for (mut args, value) in old_nodes {
+        for (mut args, value) in old_nodes.stable {
             for (a, ty) in args.iter_mut().zip(&self.schema.input) {
                 if ty.is_eq_sort() {
                     *a = uf.find_mut_value(*a)
@@ -60,11 +100,13 @@ impl Function {
             }
             let _new_value = if self.schema.output.is_eq_sort() {
                 self.nodes
+                    .stable
                     .entry(args)
                     .and_modify(|value2| *value2 = uf.union_values(value, *value2))
                     .or_insert_with(|| uf.find_mut_value(value))
             } else {
                 self.nodes
+                    .stable
                     .entry(args)
                     // .and_modify(|value2| *value2 = uf.union_values(value.clone(), value2.clone()))
                     .or_insert(value)
@@ -250,7 +292,12 @@ impl EGraph {
     fn debug_assert_invariants(&self) {
         #[cfg(debug_assertions)]
         for (name, function) in self.functions.iter() {
-            for (inputs, output) in function.nodes.iter() {
+            for (inputs, output) in function
+                .nodes
+                .stable
+                .iter()
+                .chain(function.nodes.recent.iter())
+            {
                 for input in inputs {
                     assert_eq!(
                         input,
@@ -470,7 +517,7 @@ impl EGraph {
         let function = Function {
             decl: decl.clone(),
             schema: ResolvedSchema { input, output },
-            nodes: HashMap::default(),
+            nodes: Default::default(),
             updates: 0,
             // TODO figure out merge and default here
         };
@@ -525,7 +572,7 @@ impl EGraph {
                 } else if let Some(f) = self.functions.get(var) {
                     assert!(f.schema.input.is_empty());
                     f.nodes
-                        .get(&vec![])
+                        .get(&[])
                         .copied()
                         .ok_or_else(|| NotFoundError(expr.clone()))
                 } else {
@@ -596,8 +643,10 @@ impl EGraph {
     fn print_function(&mut self, sym: Symbol, n: usize) -> Result<String, Error> {
         let f = self.functions.get(&sym).ok_or(TypeError::Unbound(sym))?;
         let schema = f.schema.clone();
+        debug_assert!(f.nodes.stabilized());
         let nodes = f
             .nodes
+            .stable
             .iter()
             .take(n)
             .map(|(k, v)| (k.clone(), *v))
@@ -668,10 +717,20 @@ impl EGraph {
         }
 
         // TODO detect functions
-        for (name, r) in &self.functions {
-            log::debug!("{name}:");
-            for (args, val) in &r.nodes {
-                log::debug!("  {args:?} = {val:?}");
+        if log::log_enabled!(log::Level::Debug) {
+            for (name, r) in &self.functions {
+                log::debug!("{name}/stable:");
+                for (args, val) in &r.nodes.stable {
+                    log::debug!("  {args:?} = {val:?}");
+                }
+                log::debug!("{name}/recent:");
+                for (args, val) in &r.nodes.recent {
+                    log::debug!("  {args:?} = {val:?}");
+                }
+                log::debug!("{name}/staged:");
+                for (args, val) in &r.nodes.staging {
+                    log::debug!("  {args:?} = {val:?}");
+                }
             }
         }
         [search_time, apply_time, rebuild_time]
@@ -792,7 +851,8 @@ impl EGraph {
             .functions
             .get(&name)
             .unwrap_or_else(|| panic!("No function {name}"));
-        for (children, value) in &f.nodes {
+        debug_assert!(f.nodes.stabilized());
+        for (children, value) in &f.nodes.stable {
             ids.clear();
             // FIXME canonicalize, do we need to with rebuilding?
             // ids.extend(children.iter().map(|id| self.find(value)));
