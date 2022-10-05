@@ -424,7 +424,7 @@ impl EGraph {
                     if &values[0] != v {
                         println!("Check failed");
                         // the check failed, so print out some useful info
-                        self.rebuild();
+                        self.rebuild_naive();
                         for value in &values {
                             if let Some((_tag, id)) = self.value_to_id(*value) {
                                 let best = self.extract(*value).1;
@@ -467,7 +467,7 @@ impl EGraph {
         self.unionfind.find(id)
     }
 
-    pub fn rebuild(&mut self) -> usize {
+    pub fn rebuild_naive(&mut self) -> usize {
         let mut updates = 0;
         loop {
             let new = self.rebuild_one();
@@ -479,6 +479,10 @@ impl EGraph {
         }
         self.debug_assert_invariants();
         updates
+    }
+
+    pub fn rebuild_seminaive(&mut self) -> bool /* changed */ {
+        todo!()
     }
 
     fn rebuild_one(&mut self) -> usize {
@@ -697,19 +701,35 @@ impl EGraph {
         self.eval_expr(&Default::default(), expr)
     }
 
-    pub fn run_rules(&mut self, limit: usize) -> [Duration; 3] {
+    pub fn run_rules(&mut self, limit: usize, mut opts: ExecOptions) -> [Duration; 3] {
         let mut search_time = Duration::default();
         let mut apply_time = Duration::default();
         let mut rebuild_time = Duration::default();
+        if limit == 1 {
+            opts.seminaive = false;
+        }
         for i in 0..limit {
-            let [st, at] = self.step_rules(i);
+            let [st, at] = if opts.seminaive {
+                self.step_rules_seminaive(i)
+            } else {
+                self.step_rules_naive(i)
+            };
             search_time += st;
             apply_time += at;
 
             let rebuild_start = Instant::now();
-            let updates = self.rebuild();
-            log::debug!("Made {updates} updates",);
+            if !opts.seminaive {
+                let updates = self.rebuild_naive();
+                log::debug!("Made {updates} updates",);
+                continue;
+            }
+            // Seminaive
+            let changed = self.rebuild_seminaive();
             rebuild_time += rebuild_start.elapsed();
+            if !changed {
+                log::debug!("breaking early");
+                break;
+            }
             // if updates == 0 {
             //     log::debug!("Breaking early!");
             //     break;
@@ -736,26 +756,7 @@ impl EGraph {
         [search_time, apply_time, rebuild_time]
     }
 
-    fn step_rules(&mut self, iteration: usize) -> [Duration; 2] {
-        fn make_subst(rule: &Rule, values: &[Value]) -> Subst {
-            let get_val = |t: &AtomTerm| match t {
-                AtomTerm::Var(sym) => {
-                    let i = rule
-                        .query
-                        .vars
-                        .get_index_of(sym)
-                        .unwrap_or_else(|| panic!("Couldn't find variable '{sym}'"));
-                    values[i]
-                }
-                AtomTerm::Value(val) => *val,
-            };
-
-            rule.bindings
-                .iter()
-                .map(|(k, t)| (*k, get_val(t)))
-                .collect()
-        }
-
+    fn step_rules_naive(&mut self, iteration: usize) -> [Duration; 2] {
         let ban_length = 5;
 
         let search_start = Instant::now();
@@ -801,6 +802,14 @@ impl EGraph {
         self.rules = rules;
         let apply_elapsed = apply_start.elapsed();
         [search_elapsed, apply_elapsed]
+    }
+
+    fn step_rules_seminaive(&mut self, _iteration: usize) -> [Duration; 2] {
+        // NB: no backoffs to start with, but we can implement them
+        // "hierarchically" if we want to add them back.
+        // * Want to override "insert" actions
+        // * Want to override the GJ stuff around "building"
+        todo!()
     }
 
     fn add_rule_with_name(&mut self, name: String, rule: ast::Rule) -> Result<Symbol, Error> {
@@ -862,7 +871,12 @@ impl EGraph {
         }
     }
 
-    fn run_command(&mut self, command: Command, should_run: bool) -> Result<String, Error> {
+    fn run_command(
+        &mut self,
+        command: Command,
+        should_run: bool,
+        opts: ExecOptions,
+    ) -> Result<String, Error> {
         Ok(match command {
             Command::Datatype { name, variants } => {
                 self.declare_sort(name)?;
@@ -896,7 +910,7 @@ impl EGraph {
             }
             Command::Run(limit) => {
                 if should_run {
-                    let [st, at, rt] = self.run_rules(limit);
+                    let [st, at, rt] = self.run_rules(limit, opts);
                     let st = st.as_secs_f64();
                     let at = at.as_secs_f64();
                     let rt = rt.as_secs_f64();
@@ -920,7 +934,7 @@ impl EGraph {
             Command::Extract { e, variants } => {
                 if should_run {
                     // TODO typecheck
-                    self.rebuild();
+                    self.rebuild_naive();
                     let value = self.eval_closed_expr(&e)?;
                     log::info!("Extracting {e} at {value:?}");
                     let (cost, expr) = self.extract(value);
@@ -1073,12 +1087,16 @@ impl EGraph {
         })
     }
 
-    fn run_program(&mut self, program: Vec<Command>) -> Result<Vec<String>, Error> {
+    fn run_program(
+        &mut self,
+        program: Vec<Command>,
+        opts: ExecOptions,
+    ) -> Result<Vec<String>, Error> {
         let mut msgs = vec![];
         let should_run = true;
 
         for command in program {
-            let msg = self.run_command(command, should_run)?;
+            let msg = self.run_command(command, should_run, opts)?;
             log::info!("{}", msg);
             msgs.push(msg);
         }
@@ -1098,13 +1116,13 @@ impl EGraph {
     pub fn parse_and_run_program(
         &mut self,
         input: &str,
-        _opts: ExecOptions,
+        opts: ExecOptions,
     ) -> Result<Vec<String>, Error> {
         let parser = ast::parse::ProgramParser::new();
         let program = parser
             .parse(input)
             .map_err(|e| e.map_token(|tok| tok.to_string()))?;
-        self.run_program(program)
+        self.run_program(program, opts)
     }
 
     pub fn num_tuples(&self) -> usize {
@@ -1133,4 +1151,23 @@ pub enum Error {
 #[derive(Default, Clone, Copy)]
 pub struct ExecOptions {
     pub seminaive: bool,
+}
+
+fn make_subst(rule: &Rule, values: &[Value]) -> Subst {
+    let get_val = |t: &AtomTerm| match t {
+        AtomTerm::Var(sym) => {
+            let i = rule
+                .query
+                .vars
+                .get_index_of(sym)
+                .unwrap_or_else(|| panic!("Couldn't find variable '{sym}'"));
+            values[i]
+        }
+        AtomTerm::Value(val) => *val,
+    };
+
+    rule.bindings
+        .iter()
+        .map(|(k, t)| (*k, get_val(t)))
+        .collect()
 }
