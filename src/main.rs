@@ -1,4 +1,4 @@
-use egg_smol::EGraph;
+use egg_smol::{EGraph, ExecOptions};
 
 fn main() {
     env_logger::Builder::new()
@@ -19,7 +19,7 @@ fn main() {
             let s = std::fs::read_to_string(arg)
                 .unwrap_or_else(|_| panic!("Failed to read file {arg}"));
             let mut egraph = EGraph::default();
-            match egraph.parse_and_run_program(&s) {
+            match egraph.parse_and_run_program(&s, ExecOptions { seminaive: false }) {
                 Ok(msgs) => {
                     for msg in msgs {
                         println!("{}", msg);

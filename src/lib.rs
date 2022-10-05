@@ -1095,7 +1095,11 @@ impl EGraph {
         }
     }
 
-    pub fn parse_and_run_program(&mut self, input: &str) -> Result<Vec<String>, Error> {
+    pub fn parse_and_run_program(
+        &mut self,
+        input: &str,
+        _opts: ExecOptions,
+    ) -> Result<Vec<String>, Error> {
         let parser = ast::parse::ProgramParser::new();
         let program = parser
             .parse(input)
@@ -1124,4 +1128,9 @@ pub enum Error {
     SortAlreadyBound(Symbol),
     #[error("Tried to pop too much")]
     Pop,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct ExecOptions {
+    pub seminaive: bool,
 }

@@ -1,4 +1,6 @@
-#![allow(clippy::unused_unit)] // weird clippy bug with wasm-bindgen
+#![allow(clippy::unused_unit)]
+use egg_smol::ExecOptions;
+// weird clippy bug with wasm-bindgen
 use wasm_bindgen::prelude::*;
 
 #[global_allocator]
@@ -7,7 +9,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 #[wasm_bindgen]
 pub fn run_program(input: &str) -> String {
     let mut egraph = egg_smol::EGraph::default();
-    match egraph.parse_and_run_program(input) {
+    match egraph.parse_and_run_program(input, ExecOptions { seminaive: false }) {
         Ok(outputs) => {
             log::info!("egg ok, {} outputs", outputs.len());
             outputs.join("<br>")
