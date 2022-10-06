@@ -128,6 +128,12 @@ impl<'b> Context<'b> {
         // Basic seminaive: execute rule 2^n-1 times against all combinations of
         // deltas and stables other than "all-stable"
 
+        // NB: this is a clear-but-slow implementation of "{false, true}^n". Faster would be:
+        // for spec in 0..(1<<self.tries.len()) {
+        //    if spec == 0 { continue; }
+        //    for stable in (0..self.tries.len()).map(|x| (spec & (1<<x)) == 0 ) { ... }
+        // }
+        // Or some such
         for spec in (0..self.tries.len())
             .map(|_| [true, false].into_iter())
             .multi_cartesian_product()

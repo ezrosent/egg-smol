@@ -18,6 +18,7 @@ use std::fmt::Write;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::Read;
+use std::mem;
 use std::ops::Deref;
 use std::{fmt::Debug, sync::Arc};
 use typecheck::{AtomTerm, Bindings};
@@ -75,6 +76,12 @@ impl FunctionData {
         self.recent.clear();
         self.staging.clear();
     }
+    /// Move the contents of `stable` into `recent`. This should only be called
+    /// when `recent` is empty.
+    pub(crate) fn promote(&mut self) {
+        debug_assert!(!self.stabilized());
+        mem::swap(&mut self.stable, &mut self.recent);
+    }
     // do not submit
     // pub(crate) fn iter_all(&self) -> impl Iterator<Item=(&Vec<Value>, &Value)> {
     //     self.stable.iter().chain(self.recent.iter()).chain(self.staging.iter()
@@ -113,6 +120,9 @@ impl Function {
             };
         }
         uf.n_unions() - n_unions + std::mem::take(&mut self.updates)
+    }
+    pub(crate) fn promote(&mut self) {
+        self.nodes.promote()
     }
 }
 
@@ -804,12 +814,44 @@ impl EGraph {
         [search_elapsed, apply_elapsed]
     }
 
-    fn step_rules_seminaive(&mut self, _iteration: usize) -> [Duration; 2] {
+    fn step_rules_seminaive(&mut self, iteration: usize) -> [Duration; 2] {
         // NB: no backoffs to start with, but we can implement them
         // "hierarchically" if we want to add them back.
         // * Want to override "insert" actions
         // * Want to override the GJ stuff around "building"
-        todo!()
+        if iteration == 0 {
+            // promote values in all (relevant?) functions stable=>recent. We'll
+            // scan them all in the first iteration.
+            for f in self.egraphs.last_mut().unwrap().functions.values_mut() {
+                f.promote();
+            }
+        }
+        let search_start = Instant::now();
+        let mut searched = vec![];
+        for rule in self.rules.values() {
+            let mut all_values = vec![];
+            self.run_query(&rule.query, false, |values| {
+                assert_eq!(values.len(), rule.query.vars.len());
+                all_values.extend_from_slice(values);
+            });
+            searched.push(all_values);
+        }
+        let search_elapsed = search_start.elapsed();
+        let apply_start = Instant::now();
+        let mut rules = std::mem::take(&mut self.rules);
+        for (rule, all_values) in rules.values_mut().zip(searched) {
+            let n = rule.query.vars.len();
+            for values in all_values.chunks(n) {
+                rule.matches += 1;
+                let subst = make_subst(rule, values);
+                log::trace!("Applying with {subst:?}");
+                let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head);
+            }
+        }
+        self.rules = rules;
+
+        let apply_elapsed = apply_start.elapsed();
+        [search_elapsed, apply_elapsed]
     }
 
     fn add_rule_with_name(&mut self, name: String, rule: ast::Rule) -> Result<Symbol, Error> {
