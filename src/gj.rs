@@ -1,5 +1,6 @@
 use bumpalo::Bump;
 use indexmap::map::Entry;
+use itertools::Itertools;
 
 use crate::{
     typecheck::{Atom, AtomTerm},
@@ -22,15 +23,24 @@ enum Instr {
 
 struct TrieRequest {
     sym: Symbol,
+    recent: bool,
     projection: Vec<usize>,
     constraints: Vec<Constraint>,
+}
+
+#[derive(Copy, Clone)]
+struct TrieData<'a> {
+    stable: &'a Trie<'a>,
+    recent: &'a Trie<'a>,
 }
 
 struct Context<'b> {
     bump: &'b Bump,
     query: &'b CompiledQuery,
     egraph: &'b EGraph,
+    seminaive: bool,
     tries: Vec<&'b Trie<'b>>,
+    trie_data: Vec<TrieData<'b>>,
     tuple: Vec<Value>,
     empty: &'b Trie<'b>,
     val_pool: Vec<Vec<Value>>,
@@ -38,14 +48,20 @@ struct Context<'b> {
 }
 
 impl<'b> Context<'b> {
-    fn new(bump: &'b Bump, egraph: &'b EGraph, query: &'b CompiledQuery) -> Self {
+    fn new(bump: &'b Bump, egraph: &'b EGraph, query: &'b CompiledQuery, seminaive: bool) -> Self {
         let default_trie = bump.alloc(Trie::default());
+        let default_data = TrieData {
+            stable: default_trie,
+            recent: default_trie,
+        };
         let mut ctx = Context {
             egraph,
             query,
             bump,
+            seminaive,
             tuple: vec![Value::fake(); query.vars.len()],
             tries: vec![default_trie; query.atoms.len()],
+            trie_data: vec![default_data; query.atoms.len()],
             empty: bump.alloc(Trie::default()),
             val_pool: Default::default(),
             trie_pool: Default::default(),
@@ -79,18 +95,59 @@ impl<'b> Context<'b> {
                     projection.push(i);
                 }
             }
-
-            ctx.tries[atom_i] = ctx.build_trie(&TrieRequest {
+            let stable = ctx.build_trie(&TrieRequest {
                 sym,
-                projection,
-                constraints,
+                recent: false,
+                projection: projection.clone(),
+                constraints: constraints.clone(),
             });
+            let recent = if seminaive {
+                ctx.build_trie(&TrieRequest {
+                    sym,
+                    recent: true,
+                    projection,
+                    constraints,
+                })
+            } else {
+                ctx.empty
+            };
+
+            ctx.trie_data[atom_i] = TrieData { stable, recent };
+            ctx.tries[atom_i] = ctx.trie_data[atom_i].stable;
         }
 
         ctx
     }
 
-    fn eval<F>(&mut self, program: &[Instr], f: &mut F)
+    fn eval(&mut self, program: &[Instr], f: &mut impl FnMut(&[Value])) {
+        if !self.seminaive {
+            self.eval_inner(program, f);
+            return;
+        }
+
+        // Basic seminaive: execute rule 2^n-1 times against all combinations of
+        // deltas and stables other than "all-stable"
+
+        for spec in (0..self.tries.len())
+            .map(|_| [true, false].into_iter())
+            .multi_cartesian_product()
+        {
+            if spec.iter().all(|stable| *stable) {
+                continue;
+            }
+            for ((stable, trie), data) in spec
+                .iter()
+                .copied()
+                .zip(self.tries.iter_mut())
+                .zip(self.trie_data.iter())
+            {
+                *trie = if stable { data.stable } else { data.recent };
+            }
+            self.eval_inner(program, f)
+        }
+    }
+
+    fn eval_inner<F>(&mut self, program: &[Instr], f: &mut F)
     where
         F: FnMut(&[Value]),
     {
@@ -210,26 +267,29 @@ impl<'b> Context<'b> {
     fn build_trie(&self, req: &TrieRequest) -> &'b Trie<'b> {
         let mut trie = Trie::default();
         if req.constraints.is_empty() {
-            self.egraph.for_each_canonicalized(req.sym, |tuple| {
-                trie.insert(self.bump, &req.projection, tuple);
-            });
+            self.egraph
+                .for_each_canonicalized(req.sym, req.recent, |tuple| {
+                    trie.insert(self.bump, &req.projection, tuple);
+                });
         } else {
-            self.egraph.for_each_canonicalized(req.sym, |tuple| {
-                for constraint in &req.constraints {
-                    let ok = match constraint {
-                        Constraint::Eq(i, j) => tuple[*i] == tuple[*j],
-                        Constraint::Const(i, t) => &tuple[*i] == t,
-                    };
-                    if ok {
-                        trie.insert(self.bump, &req.projection, tuple);
+            self.egraph
+                .for_each_canonicalized(req.sym, req.recent, |tuple| {
+                    for constraint in &req.constraints {
+                        let ok = match constraint {
+                            Constraint::Eq(i, j) => tuple[*i] == tuple[*j],
+                            Constraint::Const(i, t) => &tuple[*i] == t,
+                        };
+                        if ok {
+                            trie.insert(self.bump, &req.projection, tuple);
+                        }
                     }
-                }
-            });
+                });
         }
         self.bump.alloc(trie)
     }
 }
 
+#[derive(Clone)]
 enum Constraint {
     Eq(usize, usize),
     Const(usize, Value),
@@ -376,12 +436,12 @@ impl EGraph {
         }
     }
 
-    pub(crate) fn run_query<F>(&self, query: &CompiledQuery, mut f: F)
+    pub(crate) fn run_query<F>(&self, query: &CompiledQuery, seminaive: bool, mut f: F)
     where
         F: FnMut(&[Value]),
     {
         let bump = Bump::new();
-        let mut ctx = Context::new(&bump, self, query);
+        let mut ctx = Context::new(&bump, self, query, seminaive);
         ctx.eval(&query.program, &mut f)
     }
 }

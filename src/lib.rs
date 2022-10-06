@@ -764,7 +764,7 @@ impl EGraph {
         for rule in self.rules.values() {
             let mut all_values = vec![];
             if rule.banned_until <= iteration {
-                self.run_query(&rule.query, |values| {
+                self.run_query(&rule.query, false, |values| {
                     assert_eq!(values.len(), rule.query.vars.len());
                     all_values.extend_from_slice(values);
                 });
@@ -854,14 +854,17 @@ impl EGraph {
         self.add_rule_with_name(name, rule)
     }
 
-    fn for_each_canonicalized(&self, name: Symbol, mut cb: impl FnMut(&[Value])) {
+    fn for_each_canonicalized(&self, name: Symbol, recent: bool, mut cb: impl FnMut(&[Value])) {
         let mut ids = vec![];
         let f = self
             .functions
             .get(&name)
             .unwrap_or_else(|| panic!("No function {name}"));
-        debug_assert!(f.nodes.stabilized());
-        for (children, value) in &f.nodes.stable {
+        for (children, value) in if recent {
+            &f.nodes.recent
+        } else {
+            &f.nodes.stable
+        } {
             ids.clear();
             // FIXME canonicalize, do we need to with rebuilding?
             // ids.extend(children.iter().map(|id| self.find(value)));

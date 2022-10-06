@@ -14,6 +14,7 @@ wasm-bindgen = ["instant/wasm-bindgen"]
 hashbrown = "0.12"
 indexmap = "1.8"
 instant = "0.1"
+itertools = "0.10.5"
 log = "0.4"
 rustc-hash = "1.1"
 symbol_table = {git = "https://github.com/mwillsey/symbol_table", rev = "acddcf8938d1b4ed2fce048c9d83c30203d404b9", features = ["global"]}
