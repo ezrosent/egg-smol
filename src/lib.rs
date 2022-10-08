@@ -42,10 +42,12 @@ pub struct Function {
     updates: usize,
 }
 
+type FunctionTable = HashMap<Vec<Value>, Value>;
+
 #[derive(Default, Clone)]
 pub(crate) struct FunctionData {
-    stable: HashMap<Vec<Value>, Value>,
-    recent: HashMap<Vec<Value>, Value>,
+    stable: FunctionTable,
+    recent: FunctionTable,
     staging: Vec<(Vec<Value>, Value)>,
 }
 
@@ -79,7 +81,7 @@ impl FunctionData {
     /// Move the contents of `stable` into `recent`. This should only be called
     /// when `recent` is empty.
     pub(crate) fn promote(&mut self) {
-        debug_assert!(!self.stabilized());
+        debug_assert!(self.stabilized());
         mem::swap(&mut self.stable, &mut self.recent);
     }
     // do not submit
@@ -94,31 +96,266 @@ struct ResolvedSchema {
     output: ArcSort,
 }
 
+#[derive(Clone, Copy)]
+enum InsertResult {
+    None,
+    Inserted,
+    Merged,
+}
+
+impl InsertResult {
+    fn changed(self) -> bool {
+        match self {
+            InsertResult::None => false,
+            InsertResult::Inserted | InsertResult::Merged => true,
+        }
+    }
+}
+
 impl Function {
-    pub fn rebuild(&mut self, uf: &mut UnionFind) -> usize {
-        // FIXME this doesn't compute updates properly
-        let n_unions = uf.n_unions();
-        let old_nodes = std::mem::take(&mut self.nodes);
-        for (mut args, value) in old_nodes.stable {
-            for (a, ty) in args.iter_mut().zip(&self.schema.input) {
-                if ty.is_eq_sort() {
-                    *a = uf.find_mut_value(*a)
+    fn canonicalize(&self, args: &mut [Value], val: &mut Value, uf: &mut UnionFind) -> bool {
+        // XXX: do we have to register a delta when we update a value here?
+        // I don't think that we do, only when we induce a union during a
+        // rebuild.
+        let mut changed = false;
+        for (a, ty) in args.iter_mut().zip(&self.schema.input) {
+            if ty.is_eq_sort() {
+                let (next, new) = uf.find_mut_value_with_delta(*a);
+                *a = next;
+                changed |= new;
+            }
+        }
+        if self.schema.output.is_eq_sort() {
+            let (next, new) = uf.find_mut_value_with_delta(*val);
+            *val = next;
+            changed |= new;
+        }
+        changed
+    }
+    fn insert_and_merge(
+        &self,
+        map: &mut FunctionTable,
+        uf: &mut UnionFind,
+        args: Vec<Value>,
+        mut value: Value,
+    ) -> InsertResult {
+        if self.schema.output.is_eq_sort() {
+            value = uf.find_mut_value(value);
+        }
+        if self.schema.output.is_eq_sort() {
+            let mut res = InsertResult::Inserted;
+            map.entry(args)
+                .and_modify(|value2| {
+                    let was = value.bits;
+                    *value2 = uf.union_values(value, *value2);
+                    res = if value2.bits == was {
+                        InsertResult::None
+                    } else {
+                        InsertResult::Merged
+                    };
+                })
+                .or_insert_with(|| uf.find_mut_value(value));
+            res
+        } else {
+            let was = map
+                .entry(args)
+                // .and_modify(|value2| *value2 = uf.union_values(value.clone(), value2.clone()))
+                .or_insert(value);
+            if was == &value {
+                InsertResult::None
+            } else {
+                InsertResult::Inserted
+            }
+        }
+    }
+    fn insert_and_merge_maybe_promote(
+        &self,
+        stable: &mut FunctionTable,
+        recent: &mut FunctionTable,
+        uf: &mut UnionFind,
+        args: Vec<Value>,
+        value: Value,
+        target_recent: bool,
+    ) -> bool {
+        match (target_recent, self.schema.output.is_eq_sort()) {
+            (true, true) => {
+                if let Some(prev) = stable.get_mut(&args) {
+                    if uf.union_values_with_delta(prev, value) {
+                        // We've changed the value. Time to promote
+                        let value = *prev;
+                        stable.remove(&args);
+                        self.insert_and_merge(recent, uf, args, value);
+                        true
+                    } else {
+                        // This tuple was already present in `stable`. Nothing's
+                        // changed.
+                        false
+                    }
+                } else {
+                    // Not present in stable. target_recent=true so we'll go
+                    // ahead and insert into recent
+                    self.insert_and_merge(recent, uf, args, value).changed()
                 }
             }
-            let _new_value = if self.schema.output.is_eq_sort() {
-                self.nodes
-                    .stable
-                    .entry(args)
-                    .and_modify(|value2| *value2 = uf.union_values(value, *value2))
-                    .or_insert_with(|| uf.find_mut_value(value))
+            (true, false) => {
+                if stable.contains_key(&args) {
+                    // We don't attempt to merge non-eq-sort values. If this is
+                    // present in stable we'll just continue on.
+                    return false;
+                }
+                // target_recent=true, so we attempt to insert into recent.
+                self.insert_and_merge(recent, uf, args, value).changed()
+            }
+            (false, true) => {
+                if let Some(prev) = stable.get_mut(&args) {
+                    if uf.union_values_with_delta(prev, value) {
+                        // We've changed the value. Time to promote
+                        let value = *prev;
+                        stable.remove(&args);
+                        self.insert_and_merge(recent, uf, args, value);
+                        true
+                    } else {
+                        // This tuple was already present in `stable`. Nothing's
+                        // changed.
+                        false
+                    }
+                } else if let Some(prev) = recent.get_mut(&args) {
+                    // If this is already in recent, we want to merge the value
+                    // and then be done. The only time we move a tuple from
+                    // recent into stable is during an update.
+                    uf.union_values_with_delta(prev, value)
+                } else {
+                    // Not present in stable or recent. target_recent=false so we'll go
+                    // ahead and insert into stable
+                    self.insert_and_merge(stable, uf, args, value).changed()
+                }
+            }
+            (false, false) => {
+                if recent.contains_key(&args) {
+                    // We don't attempt to merge non-eq-sort values. If this is
+                    // present in recent we'll just continue on.
+                    return false;
+                }
+                // target_recent=false, so we attempt to insert into stable.
+                self.insert_and_merge(stable, uf, args, value).changed()
+            }
+        }
+    }
+    pub(crate) fn start_rebuild_seminaive(&mut self, uf: &mut UnionFind) -> bool {
+        let mut changed = false;
+        let mut stable = mem::take(&mut self.nodes.stable);
+        let mut new_stable = Default::default();
+        let mut recent = mem::take(&mut self.nodes.recent);
+        let mut new_recent = Default::default();
+        let mut staging = mem::take(&mut self.nodes.staging);
+        for (mut args, mut value) in stable.drain() {
+            changed |= if self.canonicalize(&mut args, &mut value, uf) {
+                // We changed during canonicalization: target the recent map.
+                self.insert_and_merge_maybe_promote(
+                    &mut new_stable,
+                    &mut new_recent,
+                    uf,
+                    args,
+                    value,
+                    true,
+                );
+                true
             } else {
-                self.nodes
-                    .stable
-                    .entry(args)
-                    // .and_modify(|value2| *value2 = uf.union_values(value.clone(), value2.clone()))
-                    .or_insert(value)
+                self.insert_and_merge_maybe_promote(
+                    &mut new_stable,
+                    &mut new_recent,
+                    uf,
+                    args,
+                    value,
+                    false,
+                )
             };
         }
+        for (mut args, mut value) in recent.drain() {
+            changed |= self.canonicalize(&mut args, &mut value, uf);
+            // unconditionally target `recent`
+            changed |= self.insert_and_merge_maybe_promote(
+                &mut new_stable,
+                &mut new_recent,
+                uf,
+                args,
+                value,
+                true,
+            );
+        }
+        for (mut args, mut value) in staging.drain(..) {
+            self.canonicalize(&mut args, &mut value, uf);
+            changed |= self.insert_and_merge_maybe_promote(
+                &mut new_stable,
+                &mut new_recent,
+                uf,
+                args,
+                value,
+                true,
+            );
+        }
+        self.nodes.stable = new_stable;
+        self.nodes.recent = new_recent;
+        self.nodes.staging = staging;
+        // TODO: pool the memory for maps.
+        changed
+    }
+    pub(crate) fn continue_rebuild_seminaive(&mut self, uf: &mut UnionFind) -> bool {
+        debug_assert!(self.nodes.staging.is_empty());
+        let mut changed = false;
+        let mut stable = mem::take(&mut self.nodes.stable);
+        let mut new_stable = Default::default();
+        let mut recent = mem::take(&mut self.nodes.recent);
+        let mut new_recent = Default::default();
+        for (mut args, mut value) in stable.drain() {
+            changed |= if self.canonicalize(&mut args, &mut value, uf) {
+                // We changed during canonicalization: target the recent map.
+                self.insert_and_merge_maybe_promote(
+                    &mut new_stable,
+                    &mut new_recent,
+                    uf,
+                    args,
+                    value,
+                    true,
+                );
+                true
+            } else {
+                self.insert_and_merge_maybe_promote(
+                    &mut new_stable,
+                    &mut new_recent,
+                    uf,
+                    args,
+                    value,
+                    false,
+                )
+            };
+        }
+        for (mut args, mut value) in recent.drain() {
+            changed |= self.canonicalize(&mut args, &mut value, uf);
+            // unconditionally target `recent`
+            changed |= self.insert_and_merge_maybe_promote(
+                &mut new_stable,
+                &mut new_recent,
+                uf,
+                args,
+                value,
+                true,
+            );
+        }
+        self.nodes.stable = new_stable;
+        self.nodes.recent = new_recent;
+        changed
+    }
+    pub fn rebuild_naive(&mut self, uf: &mut UnionFind) -> usize {
+        // FIXME this doesn't compute updates properly
+        let n_unions = uf.n_unions();
+        let old_nodes = mem::take(&mut self.nodes);
+        let mut new_stable = HashMap::default();
+        for (mut args, mut value) in old_nodes.stable {
+            self.canonicalize(&mut args, &mut value, uf);
+            self.insert_and_merge(&mut new_stable, uf, args, value);
+        }
+        self.nodes.stable = new_stable;
         uf.n_unions() - n_unions + std::mem::take(&mut self.updates)
     }
     pub(crate) fn promote(&mut self) {
@@ -492,13 +729,34 @@ impl EGraph {
     }
 
     pub fn rebuild_seminaive(&mut self) -> bool /* changed */ {
-        todo!()
+        let mut changed = false;
+        for f in self.functions.values_mut() {
+            changed |= f.start_rebuild_seminaive(&mut self.unionfind);
+        }
+        if !changed {
+            return false;
+        }
+        loop {
+            // We need a separate variable to capture changes introduced by the
+            // rebuilding loop. Rebuilding needs to converge even if we report a
+            // change back to the outer iteration loop indicating that we
+            // accumulated nontrivial deltas in this iteration of the rules.
+            let mut local_changed = false;
+            for f in self.functions.values_mut() {
+                local_changed |= f.continue_rebuild_seminaive(&mut self.unionfind);
+            }
+            changed |= local_changed;
+            if !local_changed {
+                break;
+            }
+        }
+        changed
     }
 
     fn rebuild_one(&mut self) -> usize {
         let mut new_unions = 0;
         for function in self.functions.values_mut() {
-            new_unions += function.rebuild(&mut self.unionfind);
+            new_unions += function.rebuild_naive(&mut self.unionfind);
         }
         new_unions
     }
@@ -818,7 +1076,6 @@ impl EGraph {
         // NB: no backoffs to start with, but we can implement them
         // "hierarchically" if we want to add them back.
         // * Want to override "insert" actions
-        // * Want to override the GJ stuff around "building"
         if iteration == 0 {
             // promote values in all (relevant?) functions stable=>recent. We'll
             // scan them all in the first iteration.
@@ -844,7 +1101,7 @@ impl EGraph {
             for values in all_values.chunks(n) {
                 rule.matches += 1;
                 let subst = make_subst(rule, values);
-                log::trace!("Applying with {subst:?}");
+                log::trace!("[seminaive] Applying with {subst:?}");
                 let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head);
             }
         }

@@ -43,11 +43,25 @@ impl UnionFind<()> {
         value
     }
 
+    pub(crate) fn find_mut_value_with_delta(&mut self, mut value: Value) -> (Value, bool) {
+        // HACK this is not safe
+        let was = value.bits;
+        let id = Id::from(was as usize);
+        value.bits = usize::from(self.find_mut(id)) as u64;
+        (value, value.bits != was)
+    }
+
     pub fn union_values(&mut self, value1: Value, value2: Value) -> Value {
         let id1 = Id::from(value1.bits as usize);
         let id2 = Id::from(value2.bits as usize);
         assert_eq!(value1.tag, value2.tag);
         Value::from_id(value1.tag, self.union(id1, id2))
+    }
+    pub fn union_values_with_delta(&mut self, val: &mut Value, from: Value) -> bool {
+        let next = self.union_values(*val, from);
+        let changed = val != &next;
+        *val = next;
+        changed
     }
 }
 
