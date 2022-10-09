@@ -618,56 +618,36 @@ impl EGraph {
                         .iter()
                         .map(|a| self.eval_expr(ctx, a))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let value = self.eval_expr(ctx, e)?;
+                    let mut value = self.eval_expr(ctx, e)?;
                     let function = self
                         .functions
                         .get_mut(f)
                         .ok_or_else(|| NotFoundError(e.clone()))?;
                     if seminaive {
-                        // NB, after #42 is fixed, we can probably just add this
-                        // to staging and handle merges later.
-                        // TODO: code duplication.
-                        // TODO: not handling 'recent'.
-                        if let Some(old_value) = function.nodes.stable.get_mut(&values) {
-                            let out = &function.schema.output;
-                            match function.decl.merge.as_ref() {
-                                None if out.name().as_str() == "Unit" => {}
-                                None if out.is_eq_sort() => {
-                                    if self.unionfind.union_values_with_delta(old_value, value) {
-                                        // Add to staging
-                                        let new_value =
-                                            *function.nodes.stable.get(&values).unwrap();
-                                        function.nodes.staging.push((values, new_value));
-                                    }
-                                }
-                                Some(expr) => {
-                                    let mut ctx = Subst::default();
-                                    ctx.insert("old".into(), *old_value);
-                                    ctx.insert("new".into(), value);
-                                    let expr = expr.clone(); // break the borrow of `function`
-                                    let old_value = *old_value;
-                                    let new_value = self.eval_expr(&ctx, &expr)?;
-                                    if new_value != old_value {
-                                        let function = self.functions.get_mut(f).unwrap();
-                                        let new_value =
-                                            *function.nodes.stable.get(&values).unwrap();
-                                        function.nodes.staging.push((values, new_value));
-                                    }
-                                }
-                                _ => panic!("invalid merge for {}", function.decl.name),
+                        // NB, this code is provisiononal and has a lot of duplication with naive evaluation.
+                        // After #42 is fixed, we can probably just add this to
+                        // staging and handle merges later.
+                        if let Some(old_value) = function
+                            .nodes
+                            .stable
+                            .get(&values)
+                            .or_else(|| function.nodes.recent.get(&values))
+                        {
+                            if &value == old_value {
+                                continue;
                             }
-                            continue;
-                        }
-                        if let Some(old_value) = function.nodes.recent.get_mut(&values) {
                             let out = &function.schema.output;
                             match function.decl.merge.as_ref() {
                                 None if out.name().as_str() == "Unit" => {}
                                 None if out.is_eq_sort() => {
-                                    if self.unionfind.union_values_with_delta(old_value, value) {
-                                        // Add to staging
-                                        let new_value =
-                                            function.nodes.recent.remove(&values).unwrap();
-                                        function.nodes.staging.push((values, new_value));
+                                    if self
+                                        .unionfind
+                                        .union_values_with_delta(&mut value, *old_value)
+                                    {
+                                        // We've had an update: don't want to
+                                        // purturb the existing database but we
+                                        // want to propagate the mutation later.
+                                        function.nodes.staging.push((values, value));
                                     }
                                 }
                                 Some(expr) => {
@@ -679,8 +659,6 @@ impl EGraph {
                                     let new_value = self.eval_expr(&ctx, &expr)?;
                                     if new_value != old_value {
                                         let function = self.functions.get_mut(f).unwrap();
-                                        let new_value =
-                                            function.nodes.recent.remove(&values).unwrap();
                                         function.nodes.staging.push((values, new_value));
                                     }
                                 }
@@ -1219,6 +1197,7 @@ impl EGraph {
         }
         let search_start = Instant::now();
         let mut searched = vec![];
+        log::trace!("stepping... rules={:#?}", self.rules);
         for rule in self.rules.values() {
             let mut all_values = vec![];
             self.run_query(&rule.query, true, |values| {

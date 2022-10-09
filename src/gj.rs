@@ -120,7 +120,12 @@ impl<'b> Context<'b> {
     }
 
     fn eval(&mut self, program: &[Instr], f: &mut impl FnMut(&[Value])) {
-        if !self.seminaive {
+        log::trace!(
+            "EVAL {:?} (note, there are {} tries)",
+            program,
+            self.tries.len()
+        );
+        if !self.seminaive || program.is_empty() {
             log::trace!("running naive gj");
             self.eval_inner(program, f);
             return;
@@ -173,7 +178,7 @@ impl<'b> Context<'b> {
                         for (val, trie) in r.0.iter() {
                             self.tuple[*idx] = *val;
                             self.tries[j] = trie;
-                            self.eval(program, f);
+                            self.eval_inner(program, f);
                         }
                         self.tries[j] = r;
                     }
@@ -190,7 +195,7 @@ impl<'b> Context<'b> {
                             self.tries[trie_indices[0]] = rs[0].0.get(val).unwrap();
                             self.tries[trie_indices[1]] = rs[1].0.get(val).unwrap();
 
-                            self.eval(program, f);
+                            self.eval_inner(program, f);
                         }
                         self.tries[trie_indices[0]] = rs[0];
                         self.tries[trie_indices[1]] = rs[1];
@@ -224,7 +229,7 @@ impl<'b> Context<'b> {
                                 }
                             }
 
-                            self.eval(program, f);
+                            self.eval_inner(program, f);
                         }
                         self.val_pool.push(intersection);
 
@@ -266,7 +271,7 @@ impl<'b> Context<'b> {
                             }
                         }
                     }
-                    self.eval(program, f);
+                    self.eval_inner(program, f);
                 }
             }
         }
