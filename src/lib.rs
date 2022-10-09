@@ -84,10 +84,6 @@ impl FunctionData {
         debug_assert!(self.stabilized());
         mem::swap(&mut self.stable, &mut self.recent);
     }
-    // do not submit
-    // pub(crate) fn iter_all(&self) -> impl Iterator<Item=(&Vec<Value>, &Value)> {
-    //     self.stable.iter().chain(self.recent.iter()).chain(self.staging.iter()
-    // }
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +128,7 @@ impl Function {
         }
         changed
     }
+
     fn insert_and_merge(
         &self,
         map: &mut FunctionTable,
@@ -168,6 +165,7 @@ impl Function {
             }
         }
     }
+
     fn insert_and_merge_maybe_promote(
         &self,
         stable: &mut FunctionTable,
@@ -241,6 +239,7 @@ impl Function {
             }
         }
     }
+
     pub(crate) fn start_rebuild_seminaive(&mut self, uf: &mut UnionFind) -> bool {
         let mut changed = false;
         let mut stable = mem::take(&mut self.nodes.stable);
@@ -300,6 +299,7 @@ impl Function {
         // TODO: pool the memory for maps.
         changed
     }
+
     pub(crate) fn continue_rebuild_seminaive(&mut self, uf: &mut UnionFind) -> bool {
         debug_assert!(self.nodes.staging.is_empty());
         let mut changed = false;
@@ -578,6 +578,7 @@ impl EGraph {
         &mut self,
         mut ctx: Option<Subst>,
         actions: &[Action],
+        seminaive: bool,
     ) -> Result<(), Error> {
         let default = Subst::default();
         for action in actions {
@@ -1064,7 +1065,7 @@ impl EGraph {
                 }
                 let subst = make_subst(rule, values);
                 log::trace!("Applying with {subst:?}");
-                let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head);
+                let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head, false);
             }
         }
         self.rules = rules;
@@ -1102,7 +1103,7 @@ impl EGraph {
                 rule.matches += 1;
                 let subst = make_subst(rule, values);
                 log::trace!("[seminaive] Applying with {subst:?}");
-                let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head);
+                let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head, true);
             }
         }
         self.rules = rules;
@@ -1262,7 +1263,10 @@ impl EGraph {
             }
             Command::Action(action) => {
                 if should_run {
-                    self.eval_actions(None, std::slice::from_ref(&action))?;
+                    // We never run a standalone action in seminaive mode.
+                    // TODO: How do these standalone actions impact our invariants elsewhere?
+                    // do we need to look at rebuilding _before_ a call to run here?
+                    self.eval_actions(None, std::slice::from_ref(&action), false)?;
                     format!("Run {action}.")
                 } else {
                     format!("Skipping running {action}.")
@@ -1383,7 +1387,7 @@ impl EGraph {
                         Action::Set(name, exprs, out)
                     });
                 }
-                self.eval_actions(None, &actions)?;
+                self.eval_actions(None, &actions, false)?;
                 format!("Read {} facts into {name} from '{file}'.", actions.len())
             }
         })
