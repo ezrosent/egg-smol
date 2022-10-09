@@ -70,7 +70,13 @@ impl FunctionData {
         self.stable.remove(args)
     }
     pub(crate) fn len(&self) -> usize {
-        assert!(self.stabilized());
+        assert!(
+            self.stabilized(),
+            "recent={:?}, stable={:?}, staging={:?}",
+            self.recent,
+            self.stable,
+            self.staging
+        );
         self.stable.len()
     }
     pub(crate) fn clear(&mut self) {
@@ -92,7 +98,7 @@ struct ResolvedSchema {
     output: ArcSort,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum InsertResult {
     None,
     Inserted,
@@ -104,6 +110,12 @@ impl InsertResult {
         match self {
             InsertResult::None => false,
             InsertResult::Inserted | InsertResult::Merged => true,
+        }
+    }
+    fn merged(self) -> bool {
+        match self {
+            InsertResult::None | InsertResult::Inserted => false,
+            InsertResult::Merged => true,
         }
     }
 }
@@ -137,6 +149,7 @@ impl Function {
         mut value: Value,
     ) -> InsertResult {
         if self.schema.output.is_eq_sort() {
+            // TODO: do we need this?
             value = uf.find_mut_value(value);
         }
         if self.schema.output.is_eq_sort() {
@@ -154,14 +167,15 @@ impl Function {
                 .or_insert_with(|| uf.find_mut_value(value));
             res
         } else {
-            let was = map
-                .entry(args)
-                // .and_modify(|value2| *value2 = uf.union_values(value.clone(), value2.clone()))
-                .or_insert(value);
-            if was == &value {
-                InsertResult::None
-            } else {
-                InsertResult::Inserted
+            match map.entry(args) {
+                Entry::Occupied(_) => {
+                    // TODO: better merging logic
+                    InsertResult::None
+                }
+                Entry::Vacant(v) => {
+                    v.insert(value);
+                    InsertResult::Inserted
+                }
             }
         }
     }
@@ -174,7 +188,7 @@ impl Function {
         args: Vec<Value>,
         value: Value,
         target_recent: bool,
-    ) -> bool {
+    ) -> InsertResult {
         match (target_recent, self.schema.output.is_eq_sort()) {
             (true, true) => {
                 if let Some(prev) = stable.get_mut(&args) {
@@ -182,27 +196,28 @@ impl Function {
                         // We've changed the value. Time to promote
                         let value = *prev;
                         stable.remove(&args);
-                        self.insert_and_merge(recent, uf, args, value);
-                        true
+                        self.insert_and_merge(recent, uf, args, value)
                     } else {
                         // This tuple was already present in `stable`. Nothing's
                         // changed.
-                        false
+                        InsertResult::None
                     }
                 } else {
                     // Not present in stable. target_recent=true so we'll go
                     // ahead and insert into recent
-                    self.insert_and_merge(recent, uf, args, value).changed()
+                    self.insert_and_merge(recent, uf, args, value)
                 }
             }
             (true, false) => {
                 if stable.contains_key(&args) {
                     // We don't attempt to merge non-eq-sort values. If this is
                     // present in stable we'll just continue on.
-                    return false;
+                    return InsertResult::None;
                 }
                 // target_recent=true, so we attempt to insert into recent.
-                self.insert_and_merge(recent, uf, args, value).changed()
+                let res = self.insert_and_merge(recent, uf, args, value);
+                log::trace!("merge into recent ({res:?})");
+                res
             }
             (false, true) => {
                 if let Some(prev) = stable.get_mut(&args) {
@@ -211,31 +226,35 @@ impl Function {
                         let value = *prev;
                         stable.remove(&args);
                         self.insert_and_merge(recent, uf, args, value);
-                        true
+                        InsertResult::Merged
                     } else {
                         // This tuple was already present in `stable`. Nothing's
                         // changed.
-                        false
+                        InsertResult::None
                     }
                 } else if let Some(prev) = recent.get_mut(&args) {
                     // If this is already in recent, we want to merge the value
                     // and then be done. The only time we move a tuple from
                     // recent into stable is during an update.
-                    uf.union_values_with_delta(prev, value)
+                    if uf.union_values_with_delta(prev, value) {
+                        InsertResult::Merged
+                    } else {
+                        InsertResult::None
+                    }
                 } else {
                     // Not present in stable or recent. target_recent=false so we'll go
                     // ahead and insert into stable
-                    self.insert_and_merge(stable, uf, args, value).changed()
+                    self.insert_and_merge(stable, uf, args, value)
                 }
             }
             (false, false) => {
                 if recent.contains_key(&args) {
                     // We don't attempt to merge non-eq-sort values. If this is
                     // present in recent we'll just continue on.
-                    return false;
+                    return InsertResult::None;
                 }
                 // target_recent=false, so we attempt to insert into stable.
-                self.insert_and_merge(stable, uf, args, value).changed()
+                self.insert_and_merge(stable, uf, args, value)
             }
         }
     }
@@ -247,7 +266,7 @@ impl Function {
         let mut recent = mem::take(&mut self.nodes.recent);
         let mut new_recent = Default::default();
         let mut staging = mem::take(&mut self.nodes.staging);
-        for (mut args, mut value) in stable.drain() {
+        for (mut args, mut value) in stable.drain().chain(recent.drain()) {
             changed |= if self.canonicalize(&mut args, &mut value, uf) {
                 // We changed during canonicalization: target the recent map.
                 self.insert_and_merge_maybe_promote(
@@ -268,30 +287,22 @@ impl Function {
                     value,
                     false,
                 )
+                .merged()
             };
         }
-        for (mut args, mut value) in recent.drain() {
-            changed |= self.canonicalize(&mut args, &mut value, uf);
-            // unconditionally target `recent`
-            changed |= self.insert_and_merge_maybe_promote(
-                &mut new_stable,
-                &mut new_recent,
-                uf,
-                args,
-                value,
-                true,
-            );
-        }
+        log::trace!("handling staging!");
         for (mut args, mut value) in staging.drain(..) {
             self.canonicalize(&mut args, &mut value, uf);
-            changed |= self.insert_and_merge_maybe_promote(
-                &mut new_stable,
-                &mut new_recent,
-                uf,
-                args,
-                value,
-                true,
-            );
+            changed |= self
+                .insert_and_merge_maybe_promote(
+                    &mut new_stable,
+                    &mut new_recent,
+                    uf,
+                    args,
+                    value,
+                    true,
+                )
+                .changed()
         }
         self.nodes.stable = new_stable;
         self.nodes.recent = new_recent;
@@ -328,19 +339,21 @@ impl Function {
                     value,
                     false,
                 )
+                .merged()
             };
         }
         for (mut args, mut value) in recent.drain() {
             changed |= self.canonicalize(&mut args, &mut value, uf);
-            // unconditionally target `recent`
-            changed |= self.insert_and_merge_maybe_promote(
-                &mut new_stable,
-                &mut new_recent,
-                uf,
-                args,
-                value,
-                true,
-            );
+            changed |= self
+                .insert_and_merge_maybe_promote(
+                    &mut new_stable,
+                    &mut new_recent,
+                    uf,
+                    args,
+                    value,
+                    true,
+                )
+                .merged();
         }
         self.nodes.stable = new_stable;
         self.nodes.recent = new_recent;
@@ -587,7 +600,7 @@ impl EGraph {
                     panic!("panic {} {:?}", msg, ctx.as_ref().unwrap_or(&default))
                 }
                 Action::Expr(e) => {
-                    self.eval_expr(ctx.as_ref().unwrap_or(&default), e)?;
+                    self.eval_expr_inner(ctx.as_ref().unwrap_or(&default), e, seminaive)?;
                 }
                 Action::Define(x, e) => {
                     if let Some(ctx) = ctx.as_mut() {
@@ -610,8 +623,75 @@ impl EGraph {
                         .functions
                         .get_mut(f)
                         .ok_or_else(|| NotFoundError(e.clone()))?;
+                    if seminaive {
+                        // NB, after #42 is fixed, we can probably just add this
+                        // to staging and handle merges later.
+                        // TODO: code duplication.
+                        // TODO: not handling 'recent'.
+                        if let Some(old_value) = function.nodes.stable.get_mut(&values) {
+                            let out = &function.schema.output;
+                            match function.decl.merge.as_ref() {
+                                None if out.name().as_str() == "Unit" => {}
+                                None if out.is_eq_sort() => {
+                                    if self.unionfind.union_values_with_delta(old_value, value) {
+                                        // Add to staging
+                                        let new_value =
+                                            *function.nodes.stable.get(&values).unwrap();
+                                        function.nodes.staging.push((values, new_value));
+                                    }
+                                }
+                                Some(expr) => {
+                                    let mut ctx = Subst::default();
+                                    ctx.insert("old".into(), *old_value);
+                                    ctx.insert("new".into(), value);
+                                    let expr = expr.clone(); // break the borrow of `function`
+                                    let old_value = *old_value;
+                                    let new_value = self.eval_expr(&ctx, &expr)?;
+                                    if new_value != old_value {
+                                        let function = self.functions.get_mut(f).unwrap();
+                                        let new_value =
+                                            *function.nodes.stable.get(&values).unwrap();
+                                        function.nodes.staging.push((values, new_value));
+                                    }
+                                }
+                                _ => panic!("invalid merge for {}", function.decl.name),
+                            }
+                            continue;
+                        }
+                        if let Some(old_value) = function.nodes.recent.get_mut(&values) {
+                            let out = &function.schema.output;
+                            match function.decl.merge.as_ref() {
+                                None if out.name().as_str() == "Unit" => {}
+                                None if out.is_eq_sort() => {
+                                    if self.unionfind.union_values_with_delta(old_value, value) {
+                                        // Add to staging
+                                        let new_value =
+                                            function.nodes.recent.remove(&values).unwrap();
+                                        function.nodes.staging.push((values, new_value));
+                                    }
+                                }
+                                Some(expr) => {
+                                    let mut ctx = Subst::default();
+                                    ctx.insert("old".into(), *old_value);
+                                    ctx.insert("new".into(), value);
+                                    let expr = expr.clone(); // break the borrow of `function`
+                                    let old_value = *old_value;
+                                    let new_value = self.eval_expr(&ctx, &expr)?;
+                                    if new_value != old_value {
+                                        let function = self.functions.get_mut(f).unwrap();
+                                        let new_value =
+                                            function.nodes.recent.remove(&values).unwrap();
+                                        function.nodes.staging.push((values, new_value));
+                                    }
+                                }
+                                _ => panic!("invalid merge for {}", function.decl.name),
+                            }
+                            continue;
+                        }
+                        function.nodes.staging.push((values.clone(), value));
+                        continue;
+                    }
                     let old_value = function.nodes.insert(values.clone(), value);
-
                     if let Some(old_value) = old_value {
                         if value != old_value {
                             let out = &function.schema.output;
@@ -731,17 +811,19 @@ impl EGraph {
 
     pub fn rebuild_seminaive(&mut self) -> bool /* changed */ {
         let mut changed = false;
+        log::trace!("start_rebuild");
         for f in self.functions.values_mut() {
             changed |= f.start_rebuild_seminaive(&mut self.unionfind);
         }
         if !changed {
             return false;
         }
-        loop {
+        for i in 0.. {
             // We need a separate variable to capture changes introduced by the
             // rebuilding loop. Rebuilding needs to converge even if we report a
             // change back to the outer iteration loop indicating that we
             // accumulated nontrivial deltas in this iteration of the rules.
+            log::trace!("continue rebuild ({i})");
             let mut local_changed = false;
             for f in self.functions.values_mut() {
                 local_changed |= f.continue_rebuild_seminaive(&mut self.unionfind);
@@ -833,10 +915,18 @@ impl EGraph {
             Literal::Unit => ().store(&*self.get_sort()).unwrap(),
         }
     }
+    pub fn eval_expr(&mut self, ctx: &Subst, expr: &Expr) -> Result<Value, NotFoundError> {
+        self.eval_expr_inner(ctx, expr, false)
+    }
 
     // this must be &mut because it'll call "make_set",
     // but it'd be nice if that didn't have to happen
-    pub fn eval_expr(&mut self, ctx: &Subst, expr: &Expr) -> Result<Value, NotFoundError> {
+    fn eval_expr_inner(
+        &mut self,
+        ctx: &Subst,
+        expr: &Expr,
+        seminaive: bool,
+    ) -> Result<Value, NotFoundError> {
         match expr {
             // TODO should we canonicalize here?
             Expr::Var(var) => {
@@ -870,20 +960,42 @@ impl EGraph {
                         let out = &function.schema.output;
                         match function.decl.default.as_ref() {
                             None if out.name() == "Unit".into() => {
-                                function.nodes.insert(values, Value::unit());
+                                if seminaive {
+                                    function.nodes.staging.push((values, Value::unit()));
+                                } else if !function.nodes.stable.contains_key(&values)
+                                    && !function.nodes.recent.contains_key(&values)
+                                {
+                                    function.nodes.insert(values, Value::unit());
+                                }
                                 Ok(Value::unit())
                             }
                             None if out.is_eq_sort() => {
                                 let id = self.unionfind.make_set();
                                 let value = Value::from_id(out.name(), id);
-                                function.nodes.insert(values, value);
+                                if seminaive {
+                                    if !function.nodes.stable.contains_key(&values)
+                                        && !function.nodes.recent.contains_key(&values)
+                                    {
+                                        function.nodes.staging.push((values, value));
+                                    }
+                                } else {
+                                    function.nodes.insert(values, value);
+                                }
                                 Ok(value)
                             }
                             Some(default) => {
                                 let default = default.clone(); // break the borrow
                                 let value = self.eval_expr(ctx, &default)?;
                                 let function = self.functions.get_mut(op).unwrap();
-                                function.nodes.insert(values, value);
+                                if seminaive {
+                                    if !function.nodes.stable.contains_key(&values)
+                                        && !function.nodes.recent.contains_key(&values)
+                                    {
+                                        function.nodes.staging.push((values, value));
+                                    }
+                                } else {
+                                    function.nodes.insert(values, value);
+                                }
                                 Ok(value)
                             }
                             _ => panic!("invalid default for {:?}", function.decl.name),
@@ -978,6 +1090,7 @@ impl EGraph {
             opts.seminaive = false;
         }
         for i in 0..limit {
+            log::trace!("Iteration {i}");
             let [st, at] = if opts.seminaive {
                 self.step_rules_seminaive(i)
             } else {
@@ -992,17 +1105,37 @@ impl EGraph {
                 log::debug!("Made {updates} updates",);
                 continue;
             }
+            for (name, f) in &self.functions {
+                log::trace!(
+                    "pre-rebuild [{name}]: recent={:?}\n\tstable={:?}\n\tstaging={:?}",
+                    f.nodes.recent,
+                    f.nodes.stable,
+                    f.nodes.staging
+                );
+            }
             // Seminaive
             let changed = self.rebuild_seminaive();
+            for (name, f) in &self.functions {
+                log::trace!(
+                    "post-rebuild [{name}]: recent={:?}\n\tstable={:?}\n\tstaging={:?}",
+                    f.nodes.recent,
+                    f.nodes.stable,
+                    f.nodes.staging
+                );
+            }
             rebuild_time += rebuild_start.elapsed();
             if !changed {
-                log::debug!("breaking early");
+                log::debug!("breaking early after {i} iterations of {limit}");
                 break;
             }
             // if updates == 0 {
             //     log::debug!("Breaking early!");
             //     break;
             // }
+        }
+        if opts.seminaive {
+            self.rebuild_seminaive();
+            self.rebuild_seminaive();
         }
 
         // TODO detect functions
@@ -1080,7 +1213,7 @@ impl EGraph {
         if iteration == 0 {
             // promote values in all (relevant?) functions stable=>recent. We'll
             // scan them all in the first iteration.
-            for f in self.egraphs.last_mut().unwrap().functions.values_mut() {
+            for f in self.functions.values_mut() {
                 f.promote();
             }
         }
@@ -1088,7 +1221,7 @@ impl EGraph {
         let mut searched = vec![];
         for rule in self.rules.values() {
             let mut all_values = vec![];
-            self.run_query(&rule.query, false, |values| {
+            self.run_query(&rule.query, true, |values| {
                 assert_eq!(values.len(), rule.query.vars.len());
                 all_values.extend_from_slice(values);
             });
@@ -1102,7 +1235,7 @@ impl EGraph {
             for values in all_values.chunks(n) {
                 rule.matches += 1;
                 let subst = make_subst(rule, values);
-                log::trace!("[seminaive] Applying with {subst:?}");
+                log::trace!("[seminaive] Applying {:?} with {subst:?}", rule.head);
                 let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head, true);
             }
         }

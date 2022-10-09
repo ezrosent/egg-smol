@@ -121,6 +121,7 @@ impl<'b> Context<'b> {
 
     fn eval(&mut self, program: &[Instr], f: &mut impl FnMut(&[Value])) {
         if !self.seminaive {
+            log::trace!("running naive gj");
             self.eval_inner(program, f);
             return;
         }
@@ -141,6 +142,7 @@ impl<'b> Context<'b> {
             if spec.iter().all(|stable| *stable) {
                 continue;
             }
+            log::trace!("stable_vec={:?}", spec);
             for ((stable, trie), data) in spec
                 .iter()
                 .copied()
