@@ -616,9 +616,9 @@ impl EGraph {
                     let ctx = ctx.as_ref().unwrap_or(&default);
                     let values = args
                         .iter()
-                        .map(|a| self.eval_expr(ctx, a))
+                        .map(|a| self.eval_expr_inner(ctx, a, seminaive))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let mut value = self.eval_expr(ctx, e)?;
+                    let mut value = self.eval_expr_inner(ctx, e, seminaive)?;
                     let function = self
                         .functions
                         .get_mut(f)
@@ -656,7 +656,7 @@ impl EGraph {
                                     ctx.insert("new".into(), value);
                                     let expr = expr.clone(); // break the borrow of `function`
                                     let old_value = *old_value;
-                                    let new_value = self.eval_expr(&ctx, &expr)?;
+                                    let new_value = self.eval_expr_inner(&ctx, &expr, seminaive)?;
                                     if new_value != old_value {
                                         let function = self.functions.get_mut(f).unwrap();
                                         function.nodes.staging.push((values, new_value));
@@ -697,15 +697,15 @@ impl EGraph {
                 }
                 Action::Union(a, b) => {
                     let ctx = ctx.as_ref().unwrap_or(&default);
-                    let a = self.eval_expr(ctx, a)?;
-                    let b = self.eval_expr(ctx, b)?;
+                    let a = self.eval_expr_inner(ctx, a, seminaive)?;
+                    let b = self.eval_expr_inner(ctx, b, seminaive)?;
                     self.unionfind.union_values(a, b);
                 }
                 Action::Delete(sym, args) => {
                     let ctx = ctx.as_ref().unwrap_or(&default);
                     let values = args
                         .iter()
-                        .map(|a| self.eval_expr(ctx, a))
+                        .map(|a| self.eval_expr_inner(ctx, a, seminaive))
                         .collect::<Result<Vec<_>, _>>()?;
                     let function = self
                         .functions
@@ -719,12 +719,23 @@ impl EGraph {
     }
 
     pub fn check_with(&mut self, ctx: &Subst, fact: &Fact) -> Result<(), Error> {
+        self.check_with_inner(ctx, fact, false)
+    }
+    pub fn check_with_inner(
+        &mut self,
+        ctx: &Subst,
+        fact: &Fact,
+        seminaive: bool,
+    ) -> Result<(), Error> {
         match fact {
             Fact::Eq(exprs) => {
                 assert!(exprs.len() > 1);
                 let values: Vec<Value> = exprs
                     .iter()
-                    .map(|e| self.eval_expr(ctx, e).map(|v| self.bad_find_value(v)))
+                    .map(|e| {
+                        self.eval_expr_inner(ctx, e, seminaive)
+                            .map(|v| self.bad_find_value(v))
+                    })
                     .collect::<Result<_, _>>()?;
                 for v in &values[1..] {
                     if &values[0] != v {
@@ -747,7 +758,10 @@ impl EGraph {
                 Expr::Call(sym, args) => {
                     let values: Vec<Value> = args
                         .iter()
-                        .map(|e| self.eval_expr(ctx, e).map(|v| self.bad_find_value(v)))
+                        .map(|e| {
+                            self.eval_expr_inner(ctx, e, seminaive)
+                                .map(|v| self.bad_find_value(v))
+                        })
                         .collect::<Result<_, _>>()?;
                     if let Some(f) = self.functions.get_mut(sym) {
                         // FIXME We don't have a unit value
@@ -758,7 +772,7 @@ impl EGraph {
                     } else if self.primitives.contains_key(sym) {
                         // HACK
                         // we didn't typecheck so we don't know which prim to call
-                        let val = self.eval_expr(ctx, expr)?;
+                        let val = self.eval_expr_inner(ctx, expr, seminaive)?;
                         assert_eq!(val, Value::unit());
                     } else {
                         return Err(Error::TypeError(TypeError::Unbound(*sym)));
@@ -929,7 +943,10 @@ impl EGraph {
             Expr::Call(op, args) => {
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
-                    values.push(self.eval_expr(ctx, arg)?);
+                    // TODO: what's going on here
+                    // values.push(self.eval_expr_inner(ctx, arg, seminaive)?);
+                    // seems to point to a hole in rebuilding.
+                    values.push(self.eval_expr_inner(ctx, arg, false)?);
                 }
                 if let Some(function) = self.functions.get_mut(op) {
                     if let Some(value) = function.nodes.get(&values) {
@@ -939,10 +956,12 @@ impl EGraph {
                         match function.decl.default.as_ref() {
                             None if out.name() == "Unit".into() => {
                                 if seminaive {
-                                    function.nodes.staging.push((values, Value::unit()));
-                                } else if !function.nodes.stable.contains_key(&values)
-                                    && !function.nodes.recent.contains_key(&values)
-                                {
+                                    if !function.nodes.stable.contains_key(&values)
+                                        && !function.nodes.recent.contains_key(&values)
+                                    {
+                                        function.nodes.staging.push((values, Value::unit()));
+                                    }
+                                } else {
                                     function.nodes.insert(values, Value::unit());
                                 }
                                 Ok(Value::unit())
@@ -962,8 +981,9 @@ impl EGraph {
                                 Ok(value)
                             }
                             Some(default) => {
-                                let default = default.clone(); // break the borrow
-                                let value = self.eval_expr(ctx, &default)?;
+                                // break the borrow
+                                let default = default.clone();
+                                let value = self.eval_expr_inner(ctx, &default, seminaive)?;
                                 let function = self.functions.get_mut(op).unwrap();
                                 if seminaive {
                                     if !function.nodes.stable.contains_key(&values)
@@ -976,7 +996,10 @@ impl EGraph {
                                 }
                                 Ok(value)
                             }
-                            _ => panic!("invalid default for {:?}", function.decl.name),
+                            x => panic!(
+                                "invalid default for {:?} (default={x:?})",
+                                function.decl.name
+                            ),
                         }
                     }
                 } else if let Some(prims) = self.primitives.get(op) {
@@ -1197,7 +1220,6 @@ impl EGraph {
         }
         let search_start = Instant::now();
         let mut searched = vec![];
-        log::trace!("stepping... rules={:#?}", self.rules);
         for rule in self.rules.values() {
             let mut all_values = vec![];
             self.run_query(&rule.query, true, |values| {

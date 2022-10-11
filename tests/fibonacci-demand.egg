@@ -13,7 +13,7 @@
 (set (Fib 1) (Num 1))
 
 (define f7 (Fib 7))
-(run 14)
+(run 20)
 (extract f7)
 (check (= f7 (Num 13)))
        
