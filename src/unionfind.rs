@@ -219,10 +219,21 @@ pub(crate) trait UnionFindLike<K: UnifyKey, V: UnifyValue> {
         debug_assert_eq!(a, self.get_parent_index(a));
         debug_assert_eq!(b, self.get_parent_index(b));
         let v = V::merge(self.get_value_index(a), self.get_value_index(b))?;
-        self.set_value_index(a, v);
-        self.set_parent_index(b, a);
-        self.did_union(a);
-        Ok(a)
+        let res = if true {
+            use std::cmp;
+            let parent = cmp::min(a, b);
+            let child = cmp::max(a, b);
+            self.set_value_index(parent, v);
+            self.set_parent_index(child, parent);
+            self.did_union(parent);
+            parent
+        } else {
+            self.set_value_index(a, v);
+            self.set_parent_index(b, a);
+            self.did_union(a);
+            a
+        };
+        Ok(res)
     }
 
     fn did_union(&mut self, _index: usize) {}

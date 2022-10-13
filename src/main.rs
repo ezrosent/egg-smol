@@ -19,7 +19,7 @@ fn main() {
             let s = std::fs::read_to_string(arg)
                 .unwrap_or_else(|_| panic!("Failed to read file {arg}"));
             let mut egraph = EGraph::default();
-            match egraph.parse_and_run_program(&s, ExecOptions { seminaive: false }) {
+            match egraph.parse_and_run_program(&s, ExecOptions { seminaive: true }) {
                 Ok(msgs) => {
                     for msg in msgs {
                         println!("{}", msg);

@@ -120,11 +120,6 @@ impl<'b> Context<'b> {
     }
 
     fn eval(&mut self, program: &[Instr], f: &mut impl FnMut(&[Value])) {
-        log::trace!(
-            "EVAL {:?} (note, there are {} tries)",
-            program,
-            self.tries.len()
-        );
         if !self.seminaive || program.is_empty() {
             log::trace!("running naive gj");
             self.eval_inner(program, f);
@@ -147,7 +142,6 @@ impl<'b> Context<'b> {
             if spec.iter().all(|stable| *stable) {
                 continue;
             }
-            log::trace!("stable_vec={:?}", spec);
             for ((stable, trie), data) in spec
                 .iter()
                 .copied()
@@ -168,7 +162,6 @@ impl<'b> Context<'b> {
             None => return f(&self.tuple),
             Some(pair) => pair,
         };
-
         match instr {
             Instr::Intersect { idx, trie_indices } => {
                 match trie_indices.len() {

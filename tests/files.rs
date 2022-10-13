@@ -5,7 +5,7 @@ fn run(path: &Path) -> datatest_stable::Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
     let program = std::fs::read_to_string(path).unwrap();
     for opts in [
-        // ExecOptions { seminaive: false },
+        ExecOptions { seminaive: false },
         ExecOptions { seminaive: true },
     ] {
         let mut egraph = EGraph::default();

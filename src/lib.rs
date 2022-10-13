@@ -48,7 +48,7 @@ type FunctionTable = HashMap<Vec<Value>, Value>;
 pub(crate) struct FunctionData {
     stable: FunctionTable,
     recent: FunctionTable,
-    staging: Vec<(Vec<Value>, Value)>,
+    staging: IndexSet<(Vec<Value>, Value)>,
 }
 
 impl FunctionData {
@@ -60,7 +60,7 @@ impl FunctionData {
         self.recent.is_empty() && self.staging.is_empty()
     }
     pub(crate) fn get(&self, args: &[Value]) -> Option<&Value> {
-        self.stable.get(args)
+        self.stable.get(args).or_else(|| self.recent.get(args))
     }
     pub(crate) fn insert(&mut self, args: Vec<Value>, ret: Value) -> Option<Value> {
         self.stable.insert(args, ret)
@@ -215,9 +215,7 @@ impl Function {
                     return InsertResult::None;
                 }
                 // target_recent=true, so we attempt to insert into recent.
-                let res = self.insert_and_merge(recent, uf, args, value);
-                log::trace!("merge into recent ({res:?})");
-                res
+                self.insert_and_merge(recent, uf, args, value)
             }
             (false, true) => {
                 if let Some(prev) = stable.get_mut(&args) {
@@ -290,7 +288,6 @@ impl Function {
                 .merged()
             };
         }
-        log::trace!("handling staging!");
         for (mut args, mut value) in staging.drain(..) {
             self.canonicalize(&mut args, &mut value, uf);
             changed |= self
@@ -647,7 +644,7 @@ impl EGraph {
                                         // We've had an update: don't want to
                                         // purturb the existing database but we
                                         // want to propagate the mutation later.
-                                        function.nodes.staging.push((values, value));
+                                        function.nodes.staging.insert((values, value));
                                     }
                                 }
                                 Some(expr) => {
@@ -659,14 +656,14 @@ impl EGraph {
                                     let new_value = self.eval_expr_inner(&ctx, &expr, seminaive)?;
                                     if new_value != old_value {
                                         let function = self.functions.get_mut(f).unwrap();
-                                        function.nodes.staging.push((values, new_value));
+                                        function.nodes.staging.insert((values, new_value));
                                     }
                                 }
                                 _ => panic!("invalid merge for {}", function.decl.name),
                             }
                             continue;
                         }
-                        function.nodes.staging.push((values.clone(), value));
+                        function.nodes.staging.insert((values.clone(), value));
                         continue;
                     }
                     let old_value = function.nodes.insert(values.clone(), value);
@@ -803,19 +800,17 @@ impl EGraph {
 
     pub fn rebuild_seminaive(&mut self) -> bool /* changed */ {
         let mut changed = false;
-        log::trace!("start_rebuild");
         for f in self.functions.values_mut() {
             changed |= f.start_rebuild_seminaive(&mut self.unionfind);
         }
         if !changed {
             return false;
         }
-        for i in 0.. {
+        for _ in 0.. {
             // We need a separate variable to capture changes introduced by the
             // rebuilding loop. Rebuilding needs to converge even if we report a
             // change back to the outer iteration loop indicating that we
             // accumulated nontrivial deltas in this iteration of the rules.
-            log::trace!("continue rebuild ({i})");
             let mut local_changed = false;
             for f in self.functions.values_mut() {
                 local_changed |= f.continue_rebuild_seminaive(&mut self.unionfind);
@@ -942,11 +937,15 @@ impl EGraph {
             Expr::Lit(lit) => Ok(self.eval_lit(lit)),
             Expr::Call(op, args) => {
                 let mut values = Vec::with_capacity(args.len());
+                if !args.is_empty() {
+                    log::debug!("recursive call on args for {op}: {args:?}");
+                }
                 for arg in args {
                     // TODO: what's going on here
-                    // values.push(self.eval_expr_inner(ctx, arg, seminaive)?);
+                    // XXX
+                    values.push(self.eval_expr_inner(ctx, arg, seminaive)?);
                     // seems to point to a hole in rebuilding.
-                    values.push(self.eval_expr_inner(ctx, arg, false)?);
+                    // values.push(self.eval_expr_inner(ctx, arg, false)?);
                 }
                 if let Some(function) = self.functions.get_mut(op) {
                     if let Some(value) = function.nodes.get(&values) {
@@ -959,7 +958,7 @@ impl EGraph {
                                     if !function.nodes.stable.contains_key(&values)
                                         && !function.nodes.recent.contains_key(&values)
                                     {
-                                        function.nodes.staging.push((values, Value::unit()));
+                                        function.nodes.staging.insert((values, Value::unit()));
                                     }
                                 } else {
                                     function.nodes.insert(values, Value::unit());
@@ -973,7 +972,7 @@ impl EGraph {
                                     if !function.nodes.stable.contains_key(&values)
                                         && !function.nodes.recent.contains_key(&values)
                                     {
-                                        function.nodes.staging.push((values, value));
+                                        function.nodes.staging.insert((values, value));
                                     }
                                 } else {
                                     function.nodes.insert(values, value);
@@ -989,7 +988,7 @@ impl EGraph {
                                     if !function.nodes.stable.contains_key(&values)
                                         && !function.nodes.recent.contains_key(&values)
                                     {
-                                        function.nodes.staging.push((values, value));
+                                        function.nodes.staging.insert((values, value));
                                     }
                                 } else {
                                     function.nodes.insert(values, value);
@@ -1091,7 +1090,6 @@ impl EGraph {
             opts.seminaive = false;
         }
         for i in 0..limit {
-            log::trace!("Iteration {i}");
             let [st, at] = if opts.seminaive {
                 self.step_rules_seminaive(i)
             } else {
@@ -1106,24 +1104,8 @@ impl EGraph {
                 log::debug!("Made {updates} updates",);
                 continue;
             }
-            for (name, f) in &self.functions {
-                log::trace!(
-                    "pre-rebuild [{name}]: recent={:?}\n\tstable={:?}\n\tstaging={:?}",
-                    f.nodes.recent,
-                    f.nodes.stable,
-                    f.nodes.staging
-                );
-            }
             // Seminaive
             let changed = self.rebuild_seminaive();
-            for (name, f) in &self.functions {
-                log::trace!(
-                    "post-rebuild [{name}]: recent={:?}\n\tstable={:?}\n\tstaging={:?}",
-                    f.nodes.recent,
-                    f.nodes.stable,
-                    f.nodes.staging
-                );
-            }
             rebuild_time += rebuild_start.elapsed();
             if !changed {
                 log::debug!("breaking early after {i} iterations of {limit}");
@@ -1198,7 +1180,6 @@ impl EGraph {
                     break 'outer;
                 }
                 let subst = make_subst(rule, values);
-                log::trace!("Applying with {subst:?}");
                 let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head, false);
             }
         }
@@ -1236,7 +1217,6 @@ impl EGraph {
             for values in all_values.chunks(n) {
                 rule.matches += 1;
                 let subst = make_subst(rule, values);
-                log::trace!("[seminaive] Applying {:?} with {subst:?}", rule.head);
                 let _result: Result<_, _> = self.eval_actions(Some(subst), &rule.head, true);
             }
         }
@@ -1294,6 +1274,7 @@ impl EGraph {
             .functions
             .get(&name)
             .unwrap_or_else(|| panic!("No function {name}"));
+        let mut called = 0;
         for (children, value) in if recent {
             &f.nodes.recent
         } else {
@@ -1305,7 +1286,9 @@ impl EGraph {
             ids.extend(children.iter().cloned());
             ids.push(*value);
             cb(&ids);
+            called += 1;
         }
+        log::debug!("called cb for {name}/recent={recent:?} {called} times");
     }
 
     fn run_command(
