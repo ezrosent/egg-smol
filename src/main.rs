@@ -11,6 +11,8 @@ struct Args {
 }
 
 fn main() {
+    #[cfg(feature = "dhat-ad-hoc")]
+    let _profiler = dhat::Profiler::new_ad_hoc();
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .format_timestamp(None)

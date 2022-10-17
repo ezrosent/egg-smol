@@ -55,6 +55,15 @@ struct ResolvedSchema {
     output: ArcSort,
 }
 
+pub(crate) struct FunctionEntry<'a> {
+    /// The index into the table where this entry is stored.
+    index: usize,
+    /// The arguments to the function in question.
+    args: &'a [Value],
+    /// The return value corresponding to the arguments to this function.
+    out: Value,
+}
+
 impl Function {
     pub fn insert(&mut self, inputs: Vec<Value>, value: Value, timestamp: u32) -> Option<Value> {
         match self.nodes.entry(inputs) {
@@ -170,6 +179,50 @@ impl Function {
         //         .filter(|out| out.timestamp >= range.end)
         //         .count()
         // }
+    }
+
+    /// Iterate over the nodes in the given timestamp range for the function. Returns the
+    pub(crate) fn iter_timestamp_range(
+        &self,
+        range: Range<u32>,
+    ) -> impl Iterator<Item = FunctionEntry> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, (args, out))| {
+                if !range.contains(&out.timestamp) {
+                    return None;
+                }
+                Some(FunctionEntry {
+                    index: i,
+                    args: args.as_slice(),
+                    out: out.value,
+                })
+            })
+    }
+
+    /// Iterate over the subset of entries in the table at the given indexes
+    /// that fall in the given timestamp range.
+    pub(crate) fn project_from_timestamp_range<'a>(
+        &'a self,
+        ixs: &'a [u32],
+        timestamp_range: Range<u32>,
+    ) -> impl Iterator<Item = FunctionEntry<'a>> {
+        ixs.iter().filter_map(move |x| {
+            let index = *x as usize;
+            let (args, out) = self
+                .nodes
+                .get_index(index)
+                .expect("index should be in range");
+            if !timestamp_range.contains(&out.timestamp) {
+                return None;
+            }
+            Some(FunctionEntry {
+                index,
+                args: args.as_slice(),
+                out: out.value,
+            })
+        })
     }
 }
 

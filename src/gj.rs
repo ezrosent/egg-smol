@@ -84,6 +84,10 @@ impl<'b> Context<'b> {
                 value_idx,
                 trie_accesses,
             } => {
+                #[cfg(feature = "dhat-ad-hoc")]
+                {
+                    dhat::ad_hoc_event(trie_accesses.len());
+                }
                 match trie_accesses.as_slice() {
                     [(j, access)] => tries[*j].for_each(access, |value, trie| {
                         let old_trie = std::mem::replace(&mut tries[*j], trie);
@@ -177,13 +181,13 @@ enum Constraint {
 }
 
 impl Constraint {
-    fn check(&self, tuple: &[Value], out: &TupleOutput) -> bool {
+    fn check(&self, tuple: &[Value], out: Value) -> bool {
         let get = |i: usize| {
             if i < tuple.len() {
                 &tuple[i]
             } else {
                 debug_assert_eq!(i, tuple.len());
-                &out.value
+                &out
             }
         };
         match self {
@@ -503,11 +507,10 @@ impl<'a> TrieAccess<'a> {
     fn make_trie_inner(&self, idxs: &[RowIdx]) -> LazyTrieInner {
         let arity = self.function.schema.input.len();
         let mut map = SparseMap::default();
-        let mut insert = |i: usize, tup: &[Value], out: &TupleOutput, val: Value| {
+        let mut insert = |i: usize, tup: &[Value], out: Value, val: Value| {
             use hashbrown::hash_map::Entry;
-            if self.timestamp_range.contains(&out.timestamp)
-                && self.constraints.iter().all(|c| c.check(tup, out))
-            {
+            // self.timestamp_range.contains(&out.timestamp)
+            if self.constraints.iter().all(|c| c.check(tup, out)) {
                 match map.entry(val) {
                     Entry::Occupied(mut e) => {
                         if let LazyTrieInner::Delayed(ref mut v) = e.get_mut().0.get_mut() {
@@ -527,27 +530,35 @@ impl<'a> TrieAccess<'a> {
 
         if idxs.is_empty() {
             if self.column < arity {
-                for (i, (tup, out)) in self.function.nodes.iter().enumerate() {
-                    insert(i, tup, out, tup[self.column])
+                for FunctionEntry { index, args, out } in self
+                    .function
+                    .iter_timestamp_range(self.timestamp_range.clone())
+                {
+                    insert(index, args, out, args[self.column])
                 }
             } else {
                 assert_eq!(self.column, arity);
-                for (i, (tup, out)) in self.function.nodes.iter().enumerate() {
-                    insert(i, tup, out, out.value);
+                for FunctionEntry { index, args, out } in self
+                    .function
+                    .iter_timestamp_range(self.timestamp_range.clone())
+                {
+                    insert(index, args, out, out);
                 }
             };
         } else if self.column < arity {
-            for idx in idxs {
-                let i = *idx as usize;
-                let (tup, out) = &self.function.nodes.get_index(i).unwrap();
-                insert(i, tup, out, tup[self.column])
+            for FunctionEntry { index, args, out } in self
+                .function
+                .project_from_timestamp_range(idxs, self.timestamp_range.clone())
+            {
+                insert(index, args, out, args[self.column])
             }
         } else {
             assert_eq!(self.column, arity);
-            for idx in idxs {
-                let i = *idx as usize;
-                let (tup, out) = &self.function.nodes.get_index(i).unwrap();
-                insert(i, tup, out, out.value)
+            for FunctionEntry { index, args, out } in self
+                .function
+                .project_from_timestamp_range(idxs, self.timestamp_range.clone())
+            {
+                insert(index, args, out, out)
             }
         }
 
