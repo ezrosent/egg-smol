@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use ast::*;
 
+use std::borrow::Borrow;
 use std::fmt::Write;
 use std::fs::File;
 use std::hash::Hash;
@@ -35,11 +36,36 @@ use util::*;
 
 use crate::typecheck::TypeError;
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct FunctionKey {
+    // TODO(eli): rename args to inputs (idiomatic for this repo)
+    args: Vec<Value>,
+}
+
+impl Borrow<[Value]> for FunctionKey {
+    fn borrow(&self) -> &[Value] {
+        self.args.as_slice()
+    }
+}
+
+impl FunctionKey {
+    pub(crate) fn vals(&self) -> &[Value] {
+        self.args.as_slice()
+    }
+    pub(crate) fn vals_mut(&mut self) -> &mut [Value] {
+        self.args.as_mut_slice()
+    }
+
+    pub(crate) fn from_vec(args: Vec<Value>) -> FunctionKey {
+        FunctionKey { args }
+    }
+}
+
 #[derive(Clone)]
 pub struct Function {
     decl: FunctionDecl,
     schema: ResolvedSchema,
-    nodes: IndexMap<Vec<Value>, TupleOutput>,
+    nodes: IndexMap<FunctionKey, TupleOutput>,
     updates: usize,
 }
 
@@ -66,7 +92,7 @@ pub(crate) struct FunctionEntry<'a> {
 
 impl Function {
     pub fn insert(&mut self, inputs: Vec<Value>, value: Value, timestamp: u32) -> Option<Value> {
-        match self.nodes.entry(inputs) {
+        match self.nodes.entry(FunctionKey::from_vec(inputs)) {
             IEntry::Occupied(mut entry) => {
                 let old = entry.get_mut();
                 if old.value == value {
@@ -101,7 +127,7 @@ impl Function {
             let mut new_timestamp = out.timestamp;
             assert!(out.timestamp <= timestamp);
             let value = out.value;
-            for (a, ty) in args.iter_mut().zip(&self.schema.input) {
+            for (a, ty) in args.vals_mut().iter_mut().zip(&self.schema.input) {
                 if ty.is_eq_sort() {
                     let new_a = uf.find_mut_value(*a);
                     if new_a != *a {
@@ -195,7 +221,7 @@ impl Function {
                 }
                 Some(FunctionEntry {
                     index: i,
-                    args: args.as_slice(),
+                    args: args.vals(),
                     out: out.value,
                 })
             })
@@ -219,7 +245,7 @@ impl Function {
             }
             Some(FunctionEntry {
                 index,
-                args: args.as_slice(),
+                args: args.vals(),
                 out: out.value,
             })
         })
@@ -412,7 +438,7 @@ impl EGraph {
         #[cfg(debug_assertions)]
         for (name, function) in self.functions.iter() {
             for (inputs, output) in function.nodes.iter() {
-                for input in inputs {
+                for input in inputs.vals() {
                     assert_eq!(
                         input,
                         &self.bad_find_value(*input),
@@ -531,7 +557,11 @@ impl EGraph {
                         .functions
                         .get_mut(sym)
                         .ok_or(TypeError::Unbound(*sym))?;
-                    if function.nodes.remove(&values).is_some() {
+                    if function
+                        .nodes
+                        .remove(&FunctionKey::from_vec(values))
+                        .is_some()
+                    {
                         self.saturated = false;
                     }
                 }
@@ -575,7 +605,7 @@ impl EGraph {
                         // FIXME We don't have a unit value
                         assert_eq!(f.schema.output.name().as_str(), "Unit");
                         f.nodes
-                            .get(&values)
+                            .get(&FunctionKey::from_vec(values))
                             .ok_or_else(|| NotFoundError(expr.clone()))?;
                     } else if self.primitives.contains_key(sym) {
                         // HACK
@@ -699,7 +729,7 @@ impl EGraph {
                     Ok(*value)
                 } else if let Some(f) = self.functions.get(var) {
                     assert!(f.schema.input.is_empty());
-                    match f.nodes.get(&vec![]) {
+                    match f.nodes.get(&FunctionKey::from_vec(vec![])) {
                         Some(out) => Ok(out.value),
                         None => Err(NotFoundError(expr.clone())),
                     }
@@ -719,7 +749,7 @@ impl EGraph {
                     values.push(self.eval_expr(ctx, arg)?);
                 }
                 if let Some(function) = self.functions.get_mut(op) {
-                    if let Some(out) = function.nodes.get(&values) {
+                    if let Some(out) = function.nodes.get(values.as_slice()) {
                         Ok(out.value)
                     } else {
                         let ts = self.timestamp;
@@ -786,7 +816,7 @@ impl EGraph {
         let s = &mut buf;
         for (ins, out) in nodes {
             write!(s, "({}", sym).unwrap();
-            for (a, t) in ins.iter().zip(&schema.input) {
+            for (a, t) in ins.vals().iter().zip(&schema.input) {
                 s.push(' ');
                 let e = if t.is_eq_sort() {
                     self.extract(*a).1
