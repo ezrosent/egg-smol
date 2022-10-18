@@ -10,6 +10,7 @@ mod value;
 use hashbrown::hash_map::Entry;
 use indexmap::map::Entry as IEntry;
 use instant::{Duration, Instant};
+use smallvec::SmallVec;
 use sort::*;
 use thiserror::Error;
 
@@ -45,6 +46,29 @@ struct FunctionKey {
 impl Borrow<[Value]> for FunctionKey {
     fn borrow(&self) -> &[Value] {
         self.args.as_slice()
+    }
+}
+
+/// A key used to identify a trie built on a particular function.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct TrieSpec {
+    columns: SmallVec<[u32; 4]>,
+    constraints: SmallVec<[Constraint; 1]>,
+}
+
+impl TrieSpec {
+    fn new(
+        columns: impl Iterator<Item = u32>,
+        constraints: impl Iterator<Item = Constraint>,
+    ) -> TrieSpec {
+        let columns = columns.collect();
+        let mut constraints: SmallVec<[Constraint; 1]> = constraints.collect();
+        constraints.sort_unstable();
+        constraints.dedup();
+        TrieSpec {
+            columns,
+            constraints,
+        }
     }
 }
 

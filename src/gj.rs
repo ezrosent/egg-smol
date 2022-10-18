@@ -5,7 +5,7 @@ use crate::{
     typecheck::{Atom, AtomTerm, Query},
     *,
 };
-use std::{cell::UnsafeCell, fmt::Debug, ops::Range};
+use std::{cell::UnsafeCell, cmp, fmt::Debug, ops::Range};
 
 enum Instr<'a> {
     Intersect {
@@ -85,9 +85,7 @@ impl<'b> Context<'b> {
                 trie_accesses,
             } => {
                 #[cfg(feature = "dhat-ad-hoc")]
-                {
-                    dhat::ad_hoc_event(trie_accesses.len());
-                }
+                dhat::ad_hoc_event(trie_accesses.len());
                 match trie_accesses.as_slice() {
                     [(j, access)] => tries[*j].for_each(access, |value, trie| {
                         let old_trie = std::mem::replace(&mut tries[*j], trie);
@@ -175,7 +173,8 @@ impl<'b> Context<'b> {
     }
 }
 
-enum Constraint {
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub(crate) enum Constraint {
     Eq(usize, usize),
     Const(usize, Value),
 }
@@ -397,10 +396,10 @@ impl EGraph {
     {
         let has_atoms = !cq.query.atoms.is_empty();
 
+        // for the later atoms, we consider everything
+        let mut timestamp_ranges = vec![0..u32::MAX; cq.query.atoms.len()];
         if has_atoms {
             let do_seminaive = true;
-            // for the later atoms, we consider everything
-            let mut timestamp_ranges = vec![0..u32::MAX; cq.query.atoms.len()];
             for (atom_i, atom) in cq.query.atoms.iter().enumerate() {
                 // this time, we only consider "new stuff" for this atom
                 if do_seminaive {
@@ -416,7 +415,7 @@ impl EGraph {
                         ListDisplay(cq.vars.keys(), " "),
                         program
                     );
-                    let tries = LazyTrie::make_initial_vec(cq.query.atoms.len());
+                    let tries = LazyTrie::make_initial_vec(&timestamp_ranges);
                     let mut trie_refs = tries.iter().collect::<Vec<_>>();
                     ctx.eval(&mut trie_refs, &program.0, &mut f);
                     log::debug!("Matched {} times", ctx.matches);
@@ -431,16 +430,29 @@ impl EGraph {
                 timestamp_ranges[atom_i] = 0..timestamp;
             }
         } else if let Some((mut ctx, program)) = Context::new(self, cq, &[]) {
-            let tries = LazyTrie::make_initial_vec(cq.query.atoms.len());
+            let tries = LazyTrie::make_initial_vec(&timestamp_ranges);
             let mut trie_refs = tries.iter().collect::<Vec<_>>();
             ctx.eval(&mut trie_refs, &program.0, &mut f)
         }
     }
 }
 
+// TODO(eli): trie caching
+// * Add a timestamp field to LazyTrie (well, it's mutable, so maybe to Inner)
+// * Force needs to handle updating timestamps accordingly (by munging ts
+//   ranges, taking a mutable map in as a param, etc.)
+// * tombstones in Function
+// * functions own their cached tries
+// * binary search for iterators.
+
 struct LazyTrie(UnsafeCell<LazyTrieInner>);
 
-enum LazyTrieInner {
+struct LazyTrieInner {
+    ts_range: Range<u32>,
+    data: LazyTrieData,
+}
+
+enum LazyTrieData {
     Delayed(SmallVec<[u32; 4]>),
     Sparse(SparseMap),
 }
@@ -449,42 +461,75 @@ type SparseMap = HashMap<Value, LazyTrie>;
 
 type RowIdx = u32;
 impl LazyTrie {
-    fn make_initial_vec(n: usize) -> Vec<Self> {
-        (0..n)
-            .map(|_| LazyTrie(UnsafeCell::new(LazyTrieInner::Delayed(Default::default()))))
+    unsafe fn with_mut_data<R>(&self, mut f: impl FnMut(&mut LazyTrieData) -> R) -> R {
+        f(&mut (*self.0.get()).data)
+    }
+    unsafe fn with_mut_inner<R>(&self, mut f: impl FnMut(&mut LazyTrieInner) -> R) -> R {
+        f(&mut *self.0.get())
+    }
+    fn make_initial_vec(ranges: &[Range<u32>]) -> Vec<Self> {
+        ranges
+            .iter()
+            .map(|range| {
+                LazyTrie(UnsafeCell::new(LazyTrieInner {
+                    ts_range: range.clone(),
+                    data: LazyTrieData::Delayed(Default::default()),
+                }))
+            })
             .collect()
     }
 
     fn len(&self) -> usize {
-        match unsafe { &*self.0.get() } {
-            LazyTrieInner::Delayed(v) => v.len(),
-            LazyTrieInner::Sparse(m) => m.len(),
+        unsafe {
+            self.with_mut_data(|data| match data {
+                LazyTrieData::Delayed(v) => v.len(),
+                LazyTrieData::Sparse(m) => m.len(),
+            })
         }
     }
 
     fn force(&self, access: &TrieAccess) -> &LazyTrieInner {
-        let this = unsafe { &mut *self.0.get() };
-        if let LazyTrieInner::Delayed(idxs) = this {
-            *this = access.make_trie_inner(idxs);
+        unsafe {
+            self.with_mut_inner(|this| {
+                if access.timestamp_range == this.ts_range {
+                    if let LazyTrieData::Delayed(idxs) = &this.data {
+                        *this = access.make_trie_inner(idxs);
+                    }
+                } else {
+                    // We've partially initialized at an old timestamp.
+                    let (diff, new) =
+                        range_diff(this.ts_range.clone(), access.timestamp_range.clone());
+                    match &mut this.data {
+                        LazyTrieData::Delayed(idxs) => {
+                            // just use the smallest range we need at the moment.
+                            *this = access.make_trie_inner(idxs);
+                        }
+                        LazyTrieData::Sparse(map) => {
+                            access.make_trie_explicit_ts(&[], diff, map);
+                            this.ts_range = new;
+                        }
+                    }
+                }
+            });
+            &*self.0.get()
         }
-        unsafe { &*self.0.get() }
     }
 
     fn for_each<'a>(&'a self, access: &TrieAccess, mut f: impl FnMut(Value, &'a LazyTrie)) {
-        match self.force(access) {
-            LazyTrieInner::Sparse(m) => {
+        match &self.force(access).data {
+            LazyTrieData::Sparse(m) => {
                 for (k, v) in m {
                     f(*k, v)
                 }
             }
-            LazyTrieInner::Delayed(_) => unreachable!(),
+            LazyTrieData::Delayed(_) => unreachable!(),
         }
     }
 
     fn get(&self, access: &TrieAccess, value: Value) -> Option<&LazyTrie> {
-        match self.force(access) {
-            LazyTrieInner::Sparse(m) => m.get(&value),
-            LazyTrieInner::Delayed(_) => unreachable!(),
+        match &self.force(access).data {
+            LazyTrieData::Sparse(m) => m.get(&value),
+            LazyTrieData::Delayed(_) => unreachable!(),
         }
     }
 }
@@ -504,25 +549,36 @@ impl<'a> std::fmt::Display for TrieAccess<'a> {
 
 impl<'a> TrieAccess<'a> {
     #[cold]
+    // TODO: add timestamp
     fn make_trie_inner(&self, idxs: &[RowIdx]) -> LazyTrieInner {
-        let arity = self.function.schema.input.len();
         let mut map = SparseMap::default();
+        self.make_trie_explicit_ts(idxs, self.timestamp_range.clone(), &mut map);
+        LazyTrieInner {
+            ts_range: self.timestamp_range.clone(),
+            data: LazyTrieData::Sparse(map),
+        }
+    }
+
+    fn make_trie_explicit_ts(&self, idxs: &[RowIdx], ts_range: Range<u32>, map: &mut SparseMap) {
+        let arity = self.function.schema.input.len();
         let mut insert = |i: usize, tup: &[Value], out: Value, val: Value| {
             use hashbrown::hash_map::Entry;
             // self.timestamp_range.contains(&out.timestamp)
             if self.constraints.iter().all(|c| c.check(tup, out)) {
                 match map.entry(val) {
                     Entry::Occupied(mut e) => {
-                        if let LazyTrieInner::Delayed(ref mut v) = e.get_mut().0.get_mut() {
+                        if let LazyTrieData::Delayed(ref mut v) = &mut e.get_mut().0.get_mut().data
+                        {
                             v.push(i as RowIdx)
                         } else {
                             unreachable!()
                         }
                     }
                     Entry::Vacant(e) => {
-                        e.insert(LazyTrie(UnsafeCell::new(LazyTrieInner::Delayed(
-                            smallvec::smallvec![i as RowIdx,],
-                        ))));
+                        e.insert(LazyTrie(UnsafeCell::new(LazyTrieInner {
+                            ts_range: self.timestamp_range.clone(),
+                            data: LazyTrieData::Delayed(smallvec::smallvec![i as RowIdx]),
+                        })));
                     }
                 }
             }
@@ -530,33 +586,29 @@ impl<'a> TrieAccess<'a> {
 
         if idxs.is_empty() {
             if self.column < arity {
-                for FunctionEntry { index, args, out } in self
-                    .function
-                    .iter_timestamp_range(self.timestamp_range.clone())
+                for FunctionEntry { index, args, out } in
+                    self.function.iter_timestamp_range(ts_range)
                 {
                     insert(index, args, out, args[self.column])
                 }
             } else {
                 assert_eq!(self.column, arity);
-                for FunctionEntry { index, args, out } in self
-                    .function
-                    .iter_timestamp_range(self.timestamp_range.clone())
+                for FunctionEntry { index, args, out } in
+                    self.function.iter_timestamp_range(ts_range)
                 {
                     insert(index, args, out, out);
                 }
             };
         } else if self.column < arity {
-            for FunctionEntry { index, args, out } in self
-                .function
-                .project_from_timestamp_range(idxs, self.timestamp_range.clone())
+            for FunctionEntry { index, args, out } in
+                self.function.project_from_timestamp_range(idxs, ts_range)
             {
                 insert(index, args, out, args[self.column])
             }
         } else {
             assert_eq!(self.column, arity);
-            for FunctionEntry { index, args, out } in self
-                .function
-                .project_from_timestamp_range(idxs, self.timestamp_range.clone())
+            for FunctionEntry { index, args, out } in
+                self.function.project_from_timestamp_range(idxs, ts_range)
             {
                 insert(index, args, out, out)
             }
@@ -573,7 +625,18 @@ impl<'a> TrieAccess<'a> {
         //         println!("Trie is not dense with len {len}!");
         //     }
         // }
-
-        LazyTrieInner::Sparse(map)
     }
+}
+
+fn range_diff(
+    cur_range: Range<u32>,
+    needed_range: Range<u32>,
+) -> (/* diff */ Range<u32>, /* union */ Range<u32>) {
+    // We assume 'cur_range' starts at 0, otherwise we could require 2 diffs.
+    // That's doable but we are avoiding it for now.
+    debug_assert_eq!(cur_range.start, 0);
+    (
+        cur_range.end..needed_range.end,
+        cmp::min(cur_range.start, needed_range.start)..cmp::max(needed_range.end, cur_range.end),
+    )
 }
