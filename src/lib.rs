@@ -19,7 +19,7 @@ use ast::*;
 use std::borrow::Borrow;
 use std::fmt::Write;
 use std::fs::File;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
@@ -39,21 +39,48 @@ use crate::typecheck::TypeError;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct FunctionKey {
-    // TODO(eli): rename args to inputs (idiomatic for this repo)
     inputs: Vec<Value>,
-    // We want to keep functions sorted by timestamp, but rebuilding perturbs
-    // the order by removing an old copy of a node and inserting a new one.
-    // Re-sorting after this removal requires O(n) work.
-    //
-    // Instead, we mark rebuilt entries as 'stale' and ignore them during
-    // lookups. If the number of tombstones gets too high we can pay an O(n)
-    // cost to remove them all at once.
-    // stale: bool,
+    /// We want to keep functions sorted by timestamp, but rebuilding perturbs
+    /// the order by removing an old copy of a node and inserting a new one.
+    /// Re-sorting after this removal requires O(n) work.
+    ///
+    /// Instead, we mark rebuilt entries as 'stale' and ignore them during
+    /// lookups. If the number of tombstones gets too high we can pay an O(n)
+    /// cost to remove them all at once.
+    stale: bool,
 }
 
-impl Borrow<[Value]> for FunctionKey {
-    fn borrow(&self) -> &[Value] {
-        self.vals()
+/// We want to be able to look up a FunctionKey in a map purely based on a slice
+/// of values, but the hash function for &[Value] does not line up with the
+/// synthesized function for FunctionKey. KeyRef adds "stale: false" to the hash
+/// function for the value slice, making it suitable for map lookups.
+#[derive(Eq, Debug)]
+#[repr(transparent)]
+struct KeyRef(pub(crate) [Value]);
+
+impl KeyRef {
+    fn from_slice(vals: &[Value]) -> &KeyRef {
+        // Safety: KeyRef is #[repr(transparent)]
+        unsafe { std::mem::transmute::<&[Value], &KeyRef>(vals) }
+    }
+}
+
+impl Hash for KeyRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+        false.hash(state);
+    }
+}
+
+impl PartialEq for KeyRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Borrow<KeyRef> for FunctionKey {
+    fn borrow(&self) -> &KeyRef {
+        KeyRef::from_slice(self.vals())
     }
 }
 
@@ -68,7 +95,7 @@ impl FunctionKey {
     pub(crate) fn from_vec(inputs: Vec<Value>) -> FunctionKey {
         FunctionKey {
             inputs,
-            // stale: false,
+            stale: false,
         }
     }
 }
@@ -101,6 +128,7 @@ pub struct Function {
     decl: FunctionDecl,
     schema: ResolvedSchema,
     nodes: IndexMap<FunctionKey, TupleOutput>,
+    stale_entries: usize,
     updates: usize,
 }
 
@@ -251,7 +279,7 @@ impl Function {
             .iter()
             .enumerate()
             .filter_map(move |(i, (args, out))| {
-                if !range.contains(&out.timestamp) {
+                if args.stale || !range.contains(&out.timestamp) {
                     return None;
                 }
                 Some(FunctionEntry {
@@ -275,7 +303,7 @@ impl Function {
                 .nodes
                 .get_index(index)
                 .expect("index should be in range");
-            if !timestamp_range.contains(&out.timestamp) {
+            if args.stale || !timestamp_range.contains(&out.timestamp) {
                 return None;
             }
             Some(FunctionEntry {
@@ -711,6 +739,7 @@ impl EGraph {
             decl: decl.clone(),
             schema: ResolvedSchema { input, output },
             nodes: Default::default(),
+            stale_entries: 0,
             updates: 0,
             // TODO figure out merge and default here
         };
@@ -784,7 +813,7 @@ impl EGraph {
                     values.push(self.eval_expr(ctx, arg)?);
                 }
                 if let Some(function) = self.functions.get_mut(op) {
-                    if let Some(out) = function.nodes.get(values.as_slice()) {
+                    if let Some(out) = function.nodes.get(KeyRef::from_slice(values.as_slice())) {
                         Ok(out.value)
                     } else {
                         let ts = self.timestamp;
