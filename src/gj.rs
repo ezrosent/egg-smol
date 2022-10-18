@@ -461,6 +461,9 @@ type SparseMap = HashMap<Value, LazyTrie>;
 
 type RowIdx = u32;
 impl LazyTrie {
+    // CPS wrappers around the interiorly-mutable data: you can still abuse
+    // this, but this makes it harder to accidentally introduce an alias.
+
     unsafe fn with_mut_data<R>(&self, mut f: impl FnMut(&mut LazyTrieData) -> R) -> R {
         f(&mut (*self.0.get()).data)
     }
@@ -586,31 +589,31 @@ impl<'a> TrieAccess<'a> {
 
         if idxs.is_empty() {
             if self.column < arity {
-                for FunctionEntry { index, args, out } in
+                for FunctionEntry { index, inputs, out } in
                     self.function.iter_timestamp_range(ts_range)
                 {
-                    insert(index, args, out, args[self.column])
+                    insert(index, inputs, out, inputs[self.column])
                 }
             } else {
                 assert_eq!(self.column, arity);
-                for FunctionEntry { index, args, out } in
+                for FunctionEntry { index, inputs, out } in
                     self.function.iter_timestamp_range(ts_range)
                 {
-                    insert(index, args, out, out);
+                    insert(index, inputs, out, out);
                 }
             };
         } else if self.column < arity {
-            for FunctionEntry { index, args, out } in
+            for FunctionEntry { index, inputs, out } in
                 self.function.project_from_timestamp_range(idxs, ts_range)
             {
-                insert(index, args, out, args[self.column])
+                insert(index, inputs, out, inputs[self.column])
             }
         } else {
             assert_eq!(self.column, arity);
-            for FunctionEntry { index, args, out } in
+            for FunctionEntry { index, inputs, out } in
                 self.function.project_from_timestamp_range(idxs, ts_range)
             {
-                insert(index, args, out, out)
+                insert(index, inputs, out, out)
             }
         }
 

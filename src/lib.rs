@@ -40,12 +40,36 @@ use crate::typecheck::TypeError;
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct FunctionKey {
     // TODO(eli): rename args to inputs (idiomatic for this repo)
-    args: Vec<Value>,
+    inputs: Vec<Value>,
+    // We want to keep functions sorted by timestamp, but rebuilding perturbs
+    // the order by removing an old copy of a node and inserting a new one.
+    // Re-sorting after this removal requires O(n) work.
+    //
+    // Instead, we mark rebuilt entries as 'stale' and ignore them during
+    // lookups. If the number of tombstones gets too high we can pay an O(n)
+    // cost to remove them all at once.
+    // stale: bool,
 }
 
 impl Borrow<[Value]> for FunctionKey {
     fn borrow(&self) -> &[Value] {
-        self.args.as_slice()
+        self.vals()
+    }
+}
+
+impl FunctionKey {
+    pub(crate) fn vals(&self) -> &[Value] {
+        self.inputs.as_slice()
+    }
+    pub(crate) fn vals_mut(&mut self) -> &mut [Value] {
+        self.inputs.as_mut_slice()
+    }
+
+    pub(crate) fn from_vec(inputs: Vec<Value>) -> FunctionKey {
+        FunctionKey {
+            inputs,
+            // stale: false,
+        }
     }
 }
 
@@ -69,19 +93,6 @@ impl TrieSpec {
             columns,
             constraints,
         }
-    }
-}
-
-impl FunctionKey {
-    pub(crate) fn vals(&self) -> &[Value] {
-        self.args.as_slice()
-    }
-    pub(crate) fn vals_mut(&mut self) -> &mut [Value] {
-        self.args.as_mut_slice()
-    }
-
-    pub(crate) fn from_vec(args: Vec<Value>) -> FunctionKey {
-        FunctionKey { args }
     }
 }
 
@@ -109,7 +120,7 @@ pub(crate) struct FunctionEntry<'a> {
     /// The index into the table where this entry is stored.
     index: usize,
     /// The arguments to the function in question.
-    args: &'a [Value],
+    inputs: &'a [Value],
     /// The return value corresponding to the arguments to this function.
     out: Value,
 }
@@ -245,7 +256,7 @@ impl Function {
                 }
                 Some(FunctionEntry {
                     index: i,
-                    args: args.vals(),
+                    inputs: args.vals(),
                     out: out.value,
                 })
             })
@@ -269,7 +280,7 @@ impl Function {
             }
             Some(FunctionEntry {
                 index,
-                args: args.vals(),
+                inputs: args.vals(),
                 out: out.value,
             })
         })
