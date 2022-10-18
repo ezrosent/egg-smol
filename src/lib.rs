@@ -2,6 +2,8 @@ pub mod ast;
 mod extract;
 mod gj;
 pub mod sort;
+#[cfg(test)]
+mod tests;
 mod typecheck;
 mod unionfind;
 mod util;
@@ -18,6 +20,7 @@ use ast::*;
 
 use std::borrow::Borrow;
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::fmt::Write;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -395,7 +398,7 @@ impl Function {
         // }
     }
 
-    /// Iterate over the nodes in the given timestamp range for the function. Returns the
+    /// Iterate over the nodes in the given timestamp range for the function.
     pub(crate) fn iter_timestamp_range(
         &self,
         range: Range<u32>,
@@ -1508,4 +1511,56 @@ pub enum Error {
     SortAlreadyBound(Symbol),
     #[error("Tried to pop too much")]
     Pop,
+}
+
+/// Binary search an IndexMap sorted by `SortKey`. Returns the index of the
+/// smallest element greater than or equal to `target`, if there is one.
+fn binary_search_by_key<K, V, SortKey: Ord, F: Fn(&V) -> &SortKey>(
+    data: &IndexMap<K, V>,
+    f: F,
+    target: &SortKey,
+) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let (_, last) = data.last().unwrap();
+    if f(last) < target {
+        return None;
+    }
+    let (_, first) = data.first().unwrap();
+    if f(first) > target {
+        return None;
+    }
+    // adapted from std::slice::binary_search_by
+    let mut size = data.len();
+    let mut left = 0;
+    let mut right = size;
+    while left < right {
+        let mut mid = left + size / 2;
+        let cmp = f(data.get_index(mid).unwrap().1).cmp(target);
+
+        // The std implementation claims that if/else generates better code than match.
+        if cmp == Ordering::Less {
+            left = mid + 1;
+        } else if cmp == Ordering::Greater {
+            right = mid;
+        } else {
+            // We need to march back to the start of the matching elements. We
+            // could have jumped into the middle of a run.
+            //
+            // TODO: this makes the algorithm O(n); we can use a variant of
+            // gallop to get it back to log(n) if needed. See
+            // https://github.com/frankmcsherry/blog/blob/master/posts/2018-05-19.md
+            while mid > 0 {
+                let next_mid = mid - 1;
+                if f(data.get_index(next_mid).unwrap().1) != target {
+                    break;
+                }
+                mid = next_mid;
+            }
+            return Some(mid);
+        }
+        size = right - left;
+    }
+    Some(left)
 }
