@@ -17,10 +17,13 @@ use thiserror::Error;
 use ast::*;
 
 use std::borrow::Borrow;
+use std::cell::Cell;
 use std::fmt::Write;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use std::iter;
+use std::mem;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::{fmt::Debug, sync::Arc};
@@ -46,8 +49,9 @@ struct FunctionKey {
     ///
     /// Instead, we mark rebuilt entries as 'stale' and ignore them during
     /// lookups. If the number of tombstones gets too high we can pay an O(n)
-    /// cost to remove them all at once.
-    stale: bool,
+    /// cost to remove them all at once. Non-stale tuples have this value set to
+    /// 0.
+    stale: usize,
 }
 
 /// We want to be able to look up a FunctionKey in a map purely based on a slice
@@ -68,7 +72,7 @@ impl KeyRef {
 impl Hash for KeyRef {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state);
-        false.hash(state);
+        0usize.hash(state);
     }
 }
 
@@ -93,10 +97,7 @@ impl FunctionKey {
     }
 
     pub(crate) fn from_vec(inputs: Vec<Value>) -> FunctionKey {
-        FunctionKey {
-            inputs,
-            stale: false,
-        }
+        FunctionKey { inputs, stale: 0 }
     }
 }
 
@@ -130,6 +131,7 @@ pub struct Function {
     nodes: IndexMap<FunctionKey, TupleOutput>,
     stale_entries: usize,
     updates: usize,
+    counter: Cell<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,95 +157,218 @@ pub(crate) struct FunctionEntry<'a> {
 
 impl Function {
     pub fn insert(&mut self, inputs: Vec<Value>, value: Value, timestamp: u32) -> Option<Value> {
-        match self.nodes.entry(FunctionKey::from_vec(inputs)) {
+        self.insert_raw(FunctionKey::from_vec(inputs), |_, _| value, timestamp)
+    }
+
+    fn insert_raw(
+        &mut self,
+        inputs: FunctionKey,
+        mut update: impl FnMut(Option<(Value, u32)>, &mut u32) -> Value,
+        mut timestamp: u32,
+    ) -> Option<Value> {
+        enum Action {
+            Done(Option<Value>),
+            Repair {
+                index: usize,
+                old_ts: u32,
+                saved: Value,
+            },
+        }
+        let action = match self.nodes.entry(inputs) {
             IEntry::Occupied(mut entry) => {
                 let old = entry.get_mut();
-                if old.value == value {
-                    Some(value)
+                let to_insert = update(Some((old.value, old.timestamp)), &mut timestamp);
+                if old.value == to_insert {
+                    Action::Done(Some(to_insert))
                 } else {
+                    let old_ts = old.timestamp;
                     let saved = old.value;
-                    old.value = value;
-                    assert!(old.timestamp <= timestamp);
-                    old.timestamp = timestamp;
+                    old.value = to_insert;
+                    old.timestamp = timestamp.max(old.timestamp);
                     self.updates += 1;
-                    debug_assert_ne!(saved, value);
-                    Some(saved)
+                    debug_assert_ne!(saved, to_insert);
+                    if old_ts == timestamp {
+                        Action::Done(Some(saved))
+                    } else {
+                        Action::Repair {
+                            index: entry.index(),
+                            old_ts,
+                            saved,
+                        }
+                    }
                 }
             }
             IEntry::Vacant(entry) => {
+                let value = update(None, &mut timestamp);
                 entry.insert(TupleOutput { value, timestamp });
                 self.updates += 1;
-                None
+                Action::Done(None)
             }
+        };
+        let res = match action {
+            Action::Done(v) => v,
+            Action::Repair {
+                index,
+                old_ts,
+                saved,
+            } => {
+                // add 1 to ensure nonzero
+                let stale = self.nodes.len() + 1;
+                let new_index = self.nodes.len();
+                let mut _unused = old_ts;
+                let tombstone = self.tombstone();
+                let was = self.nodes.insert(
+                    tombstone,
+                    TupleOutput {
+                        value: update(None, &mut _unused),
+                        timestamp: old_ts,
+                    },
+                );
+                assert!(was.is_none());
+                self.nodes.swap_indices(index, new_index);
+                self.stale_entries += 1;
+                Some(saved)
+            }
+        };
+        self.maybe_rehash();
+        res
+    }
+
+    fn tombstone(&self) -> FunctionKey {
+        let res = FunctionKey {
+            inputs: Default::default(),
+            stale: self.counter.get(),
+        };
+        self.counter.set(self.counter.get() + 1);
+        res
+    }
+
+    fn maybe_rehash(&mut self) {
+        if self.nodes.len() > 8 && self.stale_entries >= (self.nodes.len() / 2) {
+            self.nodes.retain(|k, _| k.stale == 0);
+            self.stale_entries = 0;
         }
     }
 
     pub fn rebuild(&mut self, uf: &mut UnionFind, timestamp: u32) -> usize {
         if self.schema.input.iter().all(|s| !s.is_eq_sort()) && !self.schema.output.is_eq_sort() {
-            return std::mem::take(&mut self.updates);
+            return mem::take(&mut self.updates);
         }
+        let updates = self.updates;
 
         // FIXME this doesn't compute updates properly
         let n_unions = uf.n_unions();
-        let old_nodes = std::mem::take(&mut self.nodes);
-        for (mut args, out) in old_nodes {
-            let mut new_timestamp = out.timestamp;
-            assert!(out.timestamp <= timestamp);
-            let value = out.value;
-            for (a, ty) in args.vals_mut().iter_mut().zip(&self.schema.input) {
-                if ty.is_eq_sort() {
-                    let new_a = uf.find_mut_value(*a);
-                    if new_a != *a {
-                        *a = new_a;
-                        new_timestamp = timestamp;
-                    }
-                }
+        let mut scratch = Vec::new();
+        for i in 0..self.nodes.len() {
+            let (inputs, output) = self.nodes.get_index(i).unwrap();
+            if inputs.stale != 0 {
+                continue;
             }
 
-            // TODO call the merge fn!!!
-            let _new_value = if self.schema.output.is_eq_sort() {
-                self.nodes
-                    .entry(args)
-                    .and_modify(|out2| {
-                        out2.value = uf.union_values(value, out2.value);
-                        out2.timestamp = timestamp; // just use the big timestamp
-                        assert!(out2.timestamp <= timestamp);
-                    })
-                    .or_insert_with(|| {
-                        let new_value = uf.find_mut_value(value);
-                        if new_value != value {
-                            new_timestamp = timestamp;
+            scratch.clear();
+            scratch.extend(inputs.inputs.iter().copied());
+            let mut ret = output.value;
+            let mut changed = false;
+            for (v, ty) in scratch
+                .iter_mut()
+                .zip(&self.schema.input)
+                .chain(iter::once((&mut ret, &self.schema.output)))
+            {
+                if ty.is_eq_sort() {
+                    let new = uf.find_mut_value(*v);
+                    changed |= &new != v;
+                    *v = new;
+                }
+            }
+            if !changed {
+                continue;
+            }
+            // The canonical representation changed. We need to reinsert and perhaps do a merge.
+            // 1. swap in a tombstone
+            let tombstone = self.tombstone();
+            assert!(self.nodes.insert(tombstone, output.clone()).is_none());
+            self.stale_entries += 1;
+            let (prev, _) = self.nodes.swap_remove_index(i).unwrap();
+            // 2. Insert the canonicalized data
+            let new_key = FunctionKey::from_vec(scratch);
+            struct RemoveAndInsert {
+                index: usize,
+                inputs: FunctionKey,
+                output: Value,
+                prev_ts: u32,
+            }
+            let action = match self.nodes.entry(new_key) {
+                IEntry::Occupied(mut o) => {
+                    // 3a. The canonicalized tuple is already in the map. Update
+                    // its timestamp and merge the outputs if necessary.
+                    if self.schema.output.is_eq_sort() {
+                        let next_val = uf.union_values(o.get().value, ret);
+                        let prev_ts = o.get().timestamp;
+                        if prev_ts == timestamp {
+                            // Timestamps match, we can update in place
+                            o.get_mut().value = next_val;
+                            None
+                        } else {
+                            Some(RemoveAndInsert {
+                                index: o.index(),
+                                inputs: o.key().clone(),
+                                output: next_val,
+                                prev_ts,
+                            })
                         }
-                        TupleOutput {
-                            value: uf.find_mut_value(value),
-                            timestamp: new_timestamp,
-                        }
-                    })
-            } else {
-                self.nodes
-                    .entry(args)
-                    .and_modify(|out2| {
-                        // out2.value = uf.union_values(value, out2.value);
-                        out2.timestamp = out2.timestamp.max(out.timestamp);
-                    })
-                    .or_insert(TupleOutput {
-                        value,
-                        timestamp: new_timestamp,
-                    })
+                    } else {
+                        // Do nothing
+                        // TODO: apply merge functions
+                        None
+                    }
+                }
+                IEntry::Vacant(v) => {
+                    // 3b. Insert the new node at the specified timestamp
+                    v.insert(TupleOutput {
+                        value: ret,
+                        timestamp,
+                    });
+                    None
+                }
             };
-            // todo!("timestamps");
-            // todo!("merge fn");
+            if let Some(RemoveAndInsert {
+                index,
+                inputs,
+                output,
+                prev_ts,
+            }) = action
+            {
+                // Tombstone the entry that we will merge in
+                let tombstone = self.tombstone();
+                assert!(self
+                    .nodes
+                    .insert(
+                        tombstone,
+                        TupleOutput {
+                            value: output,
+                            timestamp: prev_ts
+                        }
+                    )
+                    .is_none());
+                self.nodes.swap_remove_index(index).unwrap();
+                self.stale_entries += 1;
+                // Add the newly-merged tuple to the end of the map
+                assert!(self
+                    .nodes
+                    .insert(
+                        inputs,
+                        TupleOutput {
+                            value: output,
+                            timestamp
+                        }
+                    )
+                    .is_none());
+            }
+            scratch = prev.inputs;
         }
-
-        // if cfg!(debug_assertions) {
-        //     let mut seen = 0;
-        //     for out in self.nodes.values() {
-        //         assert!(seen <= out.timestamp, "Timestamps should be ordered");
-        //         seen = out.timestamp;
-        //     }
-        // }
-
-        uf.n_unions() - n_unions + std::mem::take(&mut self.updates)
+        self.maybe_rehash();
+        self.updates = 0;
+        uf.n_unions() - n_unions + updates
     }
 
     pub(crate) fn get_size(&self, range: &Range<u32>) -> usize {
@@ -279,7 +404,7 @@ impl Function {
             .iter()
             .enumerate()
             .filter_map(move |(i, (args, out))| {
-                if args.stale || !range.contains(&out.timestamp) {
+                if args.stale != 0 || !range.contains(&out.timestamp) {
                     return None;
                 }
                 Some(FunctionEntry {
@@ -303,7 +428,7 @@ impl Function {
                 .nodes
                 .get_index(index)
                 .expect("index should be in range");
-            if args.stale || !timestamp_range.contains(&out.timestamp) {
+            if args.stale != 0 || !timestamp_range.contains(&out.timestamp) {
                 return None;
             }
             Some(FunctionEntry {
@@ -500,7 +625,18 @@ impl EGraph {
     fn debug_assert_invariants(&self) {
         #[cfg(debug_assertions)]
         for (name, function) in self.functions.iter() {
+            let ts: Vec<_> = function.nodes.values().map(|x| x.timestamp).collect();
+            assert!(
+                ts.windows(2).all(|x| x[0] <= x[1]),
+                "{:?}\n{:?}",
+                function.nodes,
+                ts
+            );
             for (inputs, output) in function.nodes.iter() {
+                if inputs.stale != 0 {
+                    continue;
+                }
+
                 for input in inputs.vals() {
                     assert_eq!(
                         input,
@@ -741,6 +877,7 @@ impl EGraph {
             nodes: Default::default(),
             stale_entries: 0,
             updates: 0,
+            counter: Cell::new(1),
             // TODO figure out merge and default here
         };
 
