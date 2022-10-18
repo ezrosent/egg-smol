@@ -95,10 +95,6 @@ impl FunctionKey {
     pub(crate) fn vals(&self) -> &[Value] {
         self.inputs.as_slice()
     }
-    pub(crate) fn vals_mut(&mut self) -> &mut [Value] {
-        self.inputs.as_mut_slice()
-    }
-
     pub(crate) fn from_vec(inputs: Vec<Value>) -> FunctionKey {
         FunctionKey { inputs, stale: 0 }
     }
@@ -215,8 +211,6 @@ impl Function {
                 old_ts,
                 saved,
             } => {
-                // add 1 to ensure nonzero
-                let stale = self.nodes.len() + 1;
                 let new_index = self.nodes.len();
                 let mut _unused = old_ts;
                 let tombstone = self.tombstone();
@@ -403,11 +397,26 @@ impl Function {
         &self,
         range: Range<u32>,
     ) -> impl Iterator<Item = FunctionEntry> {
+        let start =
+            if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.start) {
+                r
+            } else {
+                self.nodes.len()
+            };
+        let continue_for =
+            if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.end) {
+                r - start
+            } else {
+                self.nodes.len() - start
+            };
         self.nodes
             .iter()
             .enumerate()
+            .skip(start)
+            .take(continue_for)
             .filter_map(move |(i, (args, out))| {
-                if args.stale != 0 || !range.contains(&out.timestamp) {
+                debug_assert!(range.contains(&out.timestamp));
+                if args.stale != 0 {
                     return None;
                 }
                 Some(FunctionEntry {
@@ -1529,7 +1538,7 @@ fn binary_search_by_key<K, V, SortKey: Ord, F: Fn(&V) -> &SortKey>(
     }
     let (_, first) = data.first().unwrap();
     if f(first) > target {
-        return None;
+        return Some(0);
     }
     // adapted from std::slice::binary_search_by
     let mut size = data.len();
