@@ -55,7 +55,13 @@ struct FunctionKey {
     /// lookups. If the number of tombstones gets too high we can pay an O(n)
     /// cost to remove them all at once. Non-stale tuples have this value set to
     /// 0.
-    stale: usize,
+    tombstone_id: usize,
+}
+
+impl FunctionKey {
+    fn stale(&self) -> bool {
+        self.tombstone_id != 0
+    }
 }
 
 /// We want to be able to look up a FunctionKey in a map purely based on a slice
@@ -97,30 +103,25 @@ impl FunctionKey {
         self.inputs.as_slice()
     }
     pub(crate) fn from_vec(inputs: Vec<Value>) -> FunctionKey {
-        FunctionKey { inputs, stale: 0 }
+        FunctionKey {
+            inputs,
+            tombstone_id: 0,
+        }
     }
 }
 
 /// A key used to identify a trie built on a particular function.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct TrieSpec {
     columns: SmallVec<[u32; 4]>,
-    // TODO: do we need to pass constraints in here too?
-}
-
-impl TrieSpec {
-    fn new(columns: impl Iterator<Item = u32>) -> TrieSpec {
-        TrieSpec {
-            columns: columns.collect(),
-        }
-    }
+    constraints: SmallVec<[SmallVec<[Constraint; 2]>; 1]>,
 }
 
 pub struct Function {
     decl: FunctionDecl,
     schema: ResolvedSchema,
     nodes: IndexMap<FunctionKey, TupleOutput>,
-    index_cache: RefCell<HashMap<TrieSpec, ManagedTrie>>,
+    index_cache: RefCell<HashMap<TrieSpec, CachedTrie>>,
     stale_entries: usize,
     updates: usize,
     counter: Cell<usize>,
@@ -167,7 +168,6 @@ impl Function {
     }
 
     fn fetch_cached_index(&self, spec: TrieSpec, range: Range<u32>) -> Option<Rc<LazyTrie>> {
-        log::trace!("spec={spec:?}");
         if range.start != 0 {
             return None;
         }
@@ -176,12 +176,8 @@ impl Function {
         }
         debug_assert!(!self.nodes.is_empty());
         let range = range.start..(self.nodes.last().unwrap().1.timestamp + 1).min(range.end);
-        log::trace!(
-            "Returning something (ts={range:?}, whole function state={:?})",
-            self.nodes.values().map(|x| x.timestamp).collect::<Vec<_>>()
-        );
         let mut inner = self.index_cache.borrow_mut();
-        let enclosing = inner.entry(spec).or_insert_with(ManagedTrie::default);
+        let enclosing = inner.entry(spec).or_insert_with(CachedTrie::default);
         Some(enclosing.access_at(self, range))
     }
 
@@ -260,7 +256,7 @@ impl Function {
     fn tombstone(&self) -> FunctionKey {
         let res = FunctionKey {
             inputs: Default::default(),
-            stale: self.counter.get(),
+            tombstone_id: self.counter.get(),
         };
         self.counter.set(self.counter.get() + 1);
         res
@@ -268,7 +264,7 @@ impl Function {
 
     fn maybe_rehash(&mut self) {
         if self.nodes.len() > 8 && self.stale_entries >= (self.nodes.len() / 2) {
-            self.nodes.retain(|k, _| k.stale == 0);
+            self.nodes.retain(|k, _| !k.stale());
             self.stale_entries = 0;
             self.index_cache.borrow_mut().clear();
         }
@@ -285,7 +281,7 @@ impl Function {
         let mut scratch = Vec::new();
         for i in 0..self.nodes.len() {
             let (inputs, output) = self.nodes.get_index(i).unwrap();
-            if inputs.stale != 0 {
+            if inputs.stale() {
                 continue;
             }
 
@@ -415,10 +411,6 @@ impl Function {
 
         let end = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.end)
             .unwrap_or(self.nodes.len());
-        log::trace!(
-            "{range:?} => {start}..{end}, contents={:?}",
-            self.nodes.values().map(|x| x.timestamp).collect::<Vec<_>>()
-        );
         start..end
     }
 
@@ -435,7 +427,7 @@ impl Function {
             .take(range.end - range.start)
             .filter_map(move |(i, (args, out))| {
                 debug_assert!(ts_range.contains(&out.timestamp));
-                if args.stale != 0 {
+                if args.stale() {
                     return None;
                 }
                 Some(FunctionEntry {
@@ -454,7 +446,7 @@ impl Function {
                 .nodes
                 .get_index(index)
                 .expect("index should be in range");
-            if args.stale != 0 {
+            if args.stale() {
                 return None;
             }
             Some(FunctionEntry {
@@ -659,7 +651,7 @@ impl EGraph {
                 ts
             );
             for (inputs, output) in function.nodes.iter() {
-                if inputs.stale != 0 {
+                if inputs.stale() {
                     continue;
                 }
 
@@ -1178,15 +1170,13 @@ impl EGraph {
                 });
                 rule.todo_timestamp = self.timestamp;
                 let rule_search_time = rule_search_start.elapsed();
-                log::trace!(
-                    "Searched for {name} in {} ({} results)",
-                    rule_search_time.as_secs_f64(),
-                    all_values.len()
-                );
                 rule.search_time += rule_search_time;
                 searched.push((name, all_values));
             }
         }
+        // Tuples addeed after this iteration must show up at a future timestamp
+        // so we know to add them to the index.
+        self.timestamp += 1;
         let search_elapsed = search_start.elapsed();
 
         let apply_start = Instant::now();
