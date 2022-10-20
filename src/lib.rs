@@ -164,29 +164,7 @@ pub(crate) struct FunctionEntry<'a> {
 
 impl Function {
     pub fn insert(&mut self, inputs: Vec<Value>, value: Value, timestamp: u32) -> Option<Value> {
-        self.insert_raw(FunctionKey::from_vec(inputs), |_, _| value, timestamp)
-    }
-
-    fn fetch_cached_index(&self, spec: TrieSpec, range: Range<u32>) -> Option<Rc<LazyTrie>> {
-        if range.start != 0 {
-            return None;
-        }
-        if self.nodes.len() == self.stale_entries {
-            return None;
-        }
-        debug_assert!(!self.nodes.is_empty());
-        let range = range.start..(self.nodes.last().unwrap().1.timestamp + 1).min(range.end);
-        let mut inner = self.index_cache.borrow_mut();
-        let enclosing = inner.entry(spec).or_insert_with(CachedTrie::default);
-        Some(enclosing.access_at(self, range))
-    }
-
-    fn insert_raw(
-        &mut self,
-        inputs: FunctionKey,
-        mut update: impl FnMut(Option<(Value, u32)>, &mut u32) -> Value,
-        mut timestamp: u32,
-    ) -> Option<Value> {
+        // self.insert_raw(FunctionKey::from_vec(inputs), |_, _| value, timestamp)
         enum Action {
             Done(Option<Value>),
             Repair {
@@ -195,10 +173,10 @@ impl Function {
                 saved: Value,
             },
         }
-        let action = match self.nodes.entry(inputs) {
+        let action = match self.nodes.entry(FunctionKey::from_vec(inputs)) {
             IEntry::Occupied(mut entry) => {
                 let old = entry.get_mut();
-                let to_insert = update(Some((old.value, old.timestamp)), &mut timestamp);
+                let to_insert = value;
                 if old.value == to_insert {
                     Action::Done(Some(to_insert))
                 } else {
@@ -220,7 +198,6 @@ impl Function {
                 }
             }
             IEntry::Vacant(entry) => {
-                let value = update(None, &mut timestamp);
                 entry.insert(TupleOutput { value, timestamp });
                 self.updates += 1;
                 Action::Done(None)
@@ -239,7 +216,7 @@ impl Function {
                 let was = self.nodes.insert(
                     tombstone,
                     TupleOutput {
-                        value: update(None, &mut _unused),
+                        value,
                         timestamp: old_ts,
                     },
                 );
@@ -251,6 +228,20 @@ impl Function {
         };
         self.maybe_rehash();
         res
+    }
+
+    fn fetch_cached_index(&self, spec: TrieSpec, range: Range<u32>) -> Option<Rc<LazyTrie>> {
+        if range.start != 0 {
+            return None;
+        }
+        if self.nodes.len() == self.stale_entries {
+            return None;
+        }
+        debug_assert!(!self.nodes.is_empty());
+        let range = range.start..(self.nodes.last().unwrap().1.timestamp + 1).min(range.end);
+        let mut inner = self.index_cache.borrow_mut();
+        let enclosing = inner.entry(spec).or_insert_with(CachedTrie::default);
+        Some(enclosing.access_at(self, range))
     }
 
     fn tombstone(&self) -> FunctionKey {
@@ -274,8 +265,6 @@ impl Function {
         if self.schema.input.iter().all(|s| !s.is_eq_sort()) && !self.schema.output.is_eq_sort() {
             return mem::take(&mut self.updates);
         }
-        let updates = self.updates;
-
         // FIXME this doesn't compute updates properly
         let n_unions = uf.n_unions();
         let mut scratch = Vec::new();
@@ -387,8 +376,7 @@ impl Function {
             scratch = prev.inputs;
         }
         self.maybe_rehash();
-        self.updates = 0;
-        uf.n_unions() - n_unions + updates
+        uf.n_unions() - n_unions + mem::take(&mut self.updates)
     }
 
     pub(crate) fn get_size(&self, range: &Range<u32>) -> usize {
