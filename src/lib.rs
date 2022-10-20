@@ -392,8 +392,9 @@ impl Function {
     }
 
     pub(crate) fn get_size(&self, range: &Range<u32>) -> usize {
-        // TODO: this can just subtract the indexes
-        self.iter_timestamp_range(range.clone()).count()
+        let range = self.timestamp_range_to_index_range(range.clone());
+        debug_assert!(range.end >= range.start, "invalid range {range:?}");
+        range.end - range.start
     }
 
     /// Return the range of indexes into `nodes` corresponding to the given
