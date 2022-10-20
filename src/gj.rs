@@ -55,16 +55,16 @@ impl<'b> Context<'b> {
         egraph: &'b EGraph,
         cq: &'b CompiledQuery,
         timestamp_ranges: &[Range<u32>],
-    ) -> Option<(Self, Program<'b>)> {
+    ) -> Option<(Self, Program<'b>, Vec<Symbol>)> {
         let ctx = Context {
             query: cq,
             tuple: vec![Value::fake(); cq.vars.len()],
             matches: 0,
         };
 
-        let (program, _vars) = egraph.compile_program(cq, timestamp_ranges)?;
+        let (program, vars) = egraph.compile_program(cq, timestamp_ranges)?;
 
-        Some((ctx, program))
+        Some((ctx, program, vars))
     }
 
     fn eval<F>(&mut self, tries: &mut [&LazyTrie], program: &[Instr], f: &mut F)
@@ -398,7 +398,24 @@ impl EGraph {
 
         // for the later atoms, we consider everything
         let mut timestamp_ranges = vec![0..u32::MAX; cq.query.atoms.len()];
+        // let cached_ranges: Vec<Option<Rc<LazyTrie>>> = cq
+        //     .query
+        //     .atoms
+        //     .iter()
+        //     .map(|x| {
+        //         self.functions[&x.head].fetch_cached_index(
+        //             TrieSpec {
+        //                 columns: todo!(),
+        //                 constraints: todo!(),
+        //             },
+        //             0..u32::MAX,
+        //         )
+        //     })
+        //     .collect();
         if has_atoms {
+            let mut scratch_tmp_tries = Vec::new();
+            let mut scratch_cached_tries = Vec::new();
+            let mut scratch_writes = Vec::new();
             let do_seminaive = true;
             for (atom_i, atom) in cq.query.atoms.iter().enumerate() {
                 // this time, we only consider "new stuff" for this atom
@@ -407,7 +424,11 @@ impl EGraph {
                 }
 
                 // do the gj
-                if let Some((mut ctx, program)) = Context::new(self, cq, &timestamp_ranges) {
+                if let Some((mut ctx, program, vars)) = Context::new(self, cq, &timestamp_ranges) {
+                    scratch_tmp_tries.clear();
+                    scratch_cached_tries.clear();
+                    scratch_writes.clear();
+                    let mut trie_refs = Vec::with_capacity(cq.query.atoms.len());
                     log::debug!(
                         "Query: {}\nNew atom: {}\nVars: {}\nProgram\n{}",
                         cq.query,
@@ -415,8 +436,40 @@ impl EGraph {
                         ListDisplay(cq.vars.keys(), " "),
                         program
                     );
-                    let tries = LazyTrie::make_initial_vec(&timestamp_ranges);
-                    let mut trie_refs = tries.iter().collect::<Vec<_>>();
+                    for (atom, range) in cq.query.atoms.iter().zip(timestamp_ranges.iter()) {
+                        let f = self.functions.get(&atom.head).unwrap();
+                        let spec = TrieSpec::new(vars.iter().filter_map(|var| {
+                            atom.args
+                                .iter()
+                                .position(|x| x == &AtomTerm::Var(*var))
+                                .map(|x| x as u32)
+                        }));
+                        if false {
+                            scratch_writes.push((false, scratch_tmp_tries.len()));
+                            scratch_tmp_tries.push(LazyTrie::new(range.clone()));
+                        } else {
+                            if let Some(trie) = f.fetch_cached_index(spec, range.clone()) {
+                                scratch_writes.push((true, scratch_cached_tries.len()));
+                                scratch_cached_tries.push(trie);
+                            } else {
+                                scratch_writes.push((false, scratch_tmp_tries.len()));
+                                scratch_tmp_tries.push(LazyTrie::new(range.clone()));
+                            }
+                        }
+                    }
+                    log::trace!("scratch_writes={scratch_writes:?}");
+                    trie_refs.extend(scratch_writes.iter().map(|(cached, index)| {
+                        if *cached {
+                            &*scratch_cached_tries[*index]
+                        } else {
+                            &scratch_tmp_tries[*index]
+                        }
+                    }));
+                    // Want to look up the cached tries on the fly here.
+                    // Backing `tries` in a smallvec for anything that we can't
+                    // cache, then grab the rcs, insert into trie_refs in
+                    // sequence. Need to compute variable order and we're good?
+                    // Where do the constraints come in.
                     ctx.eval(&mut trie_refs, &program.0, &mut f);
                     log::debug!("Matched {} times", ctx.matches);
                 }
@@ -429,7 +482,7 @@ impl EGraph {
                 // range is half-open; timestamp is excluded
                 timestamp_ranges[atom_i] = 0..timestamp;
             }
-        } else if let Some((mut ctx, program)) = Context::new(self, cq, &[]) {
+        } else if let Some((mut ctx, program, _)) = Context::new(self, cq, &[]) {
             let tries = LazyTrie::make_initial_vec(&timestamp_ranges);
             let mut trie_refs = tries.iter().collect::<Vec<_>>();
             ctx.eval(&mut trie_refs, &program.0, &mut f)
@@ -445,7 +498,7 @@ impl EGraph {
 // * functions own their cached tries
 // * binary search for iterators.
 
-struct LazyTrie(UnsafeCell<LazyTrieInner>);
+pub(crate) struct LazyTrie(UnsafeCell<LazyTrieInner>);
 
 struct LazyTrieInner {
     ts_range: Range<u32>,
@@ -471,15 +524,14 @@ impl LazyTrie {
         f(&mut *self.0.get())
     }
     fn make_initial_vec(ranges: &[Range<u32>]) -> Vec<Self> {
-        ranges
-            .iter()
-            .map(|range| {
-                LazyTrie(UnsafeCell::new(LazyTrieInner {
-                    ts_range: range.clone(),
-                    data: LazyTrieData::Delayed(Default::default()),
-                }))
-            })
-            .collect()
+        ranges.iter().cloned().map(LazyTrie::new).collect()
+    }
+
+    pub(crate) fn new(ts_range: Range<u32>) -> LazyTrie {
+        LazyTrie(UnsafeCell::new(LazyTrieInner {
+            ts_range,
+            data: LazyTrieData::Delayed(Default::default()),
+        }))
     }
 
     fn len(&self) -> usize {
@@ -505,10 +557,11 @@ impl LazyTrie {
                     match &mut this.data {
                         LazyTrieData::Delayed(idxs) => {
                             // just use the smallest range we need at the moment.
-                            *this = access.make_trie_inner(idxs);
+                            *this = access.make_trie_explicit_timestamp(idxs, new);
                         }
                         LazyTrieData::Sparse(map) => {
-                            access.make_trie_explicit_ts(&[], diff, map);
+                            log::trace!("new case");
+                            access.initialize_trie_level(&[], diff, map);
                             this.ts_range = new;
                         }
                     }
@@ -554,29 +607,35 @@ impl<'a> TrieAccess<'a> {
     #[cold]
     // TODO: add timestamp
     fn make_trie_inner(&self, idxs: &[RowIdx]) -> LazyTrieInner {
+        self.make_trie_explicit_timestamp(idxs, self.timestamp_range.clone())
+    }
+
+    fn make_trie_explicit_timestamp(&self, idxs: &[RowIdx], ts: Range<u32>) -> LazyTrieInner {
         let mut map = SparseMap::default();
-        self.make_trie_explicit_ts(idxs, self.timestamp_range.clone(), &mut map);
+        self.initialize_trie_level(idxs, ts, &mut map);
         LazyTrieInner {
             ts_range: self.timestamp_range.clone(),
             data: LazyTrieData::Sparse(map),
         }
     }
 
-    fn make_trie_explicit_ts(&self, idxs: &[RowIdx], ts_range: Range<u32>, map: &mut SparseMap) {
+    fn initialize_trie_level(&self, idxs: &[RowIdx], ts_range: Range<u32>, map: &mut SparseMap) {
         let arity = self.function.schema.input.len();
         let mut insert = |i: usize, tup: &[Value], out: Value, val: Value| {
             use hashbrown::hash_map::Entry;
             // self.timestamp_range.contains(&out.timestamp)
             if self.constraints.iter().all(|c| c.check(tup, out)) {
                 match map.entry(val) {
-                    Entry::Occupied(mut e) => {
-                        if let LazyTrieData::Delayed(ref mut v) = &mut e.get_mut().0.get_mut().data
-                        {
-                            v.push(i as RowIdx)
-                        } else {
-                            unreachable!()
+                    Entry::Occupied(mut e) => match &mut e.get_mut().0.get_mut().data {
+                        LazyTrieData::Delayed(v) => v.push(i as RowIdx),
+                        LazyTrieData::Sparse(inner) => {
+                            // XXX: is this sufficient? Feels like it isn't
+                            inner
+                                .entry(val)
+                                .or_insert_with(|| LazyTrie::new(self.timestamp_range.clone()));
+                            todo!()
                         }
-                    }
+                    },
                     Entry::Vacant(e) => {
                         e.insert(LazyTrie(UnsafeCell::new(LazyTrieInner {
                             ts_range: self.timestamp_range.clone(),

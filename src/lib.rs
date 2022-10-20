@@ -19,7 +19,7 @@ use thiserror::Error;
 use ast::*;
 
 use std::borrow::Borrow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::fmt::Write;
 use std::fs::File;
@@ -29,6 +29,7 @@ use std::iter;
 use std::mem;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::{fmt::Debug, sync::Arc};
 use typecheck::{AtomTerm, Bindings};
 
@@ -104,33 +105,39 @@ impl FunctionKey {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct TrieSpec {
     columns: SmallVec<[u32; 4]>,
-    constraints: SmallVec<[Constraint; 1]>,
+    // TODO: do we need to pass constraints in here too?
 }
 
 impl TrieSpec {
-    fn new(
-        columns: impl Iterator<Item = u32>,
-        constraints: impl Iterator<Item = Constraint>,
-    ) -> TrieSpec {
-        let columns = columns.collect();
-        let mut constraints: SmallVec<[Constraint; 1]> = constraints.collect();
-        constraints.sort_unstable();
-        constraints.dedup();
+    fn new(columns: impl Iterator<Item = u32>) -> TrieSpec {
         TrieSpec {
-            columns,
-            constraints,
+            columns: columns.collect(),
         }
     }
 }
 
-#[derive(Clone)]
 pub struct Function {
     decl: FunctionDecl,
     schema: ResolvedSchema,
     nodes: IndexMap<FunctionKey, TupleOutput>,
+    index_cache: RefCell<HashMap<TrieSpec, Rc<LazyTrie>>>,
     stale_entries: usize,
     updates: usize,
     counter: Cell<usize>,
+}
+
+impl Clone for Function {
+    fn clone(&self) -> Self {
+        Function {
+            decl: self.decl.clone(),
+            schema: self.schema.clone(),
+            nodes: self.nodes.clone(),
+            index_cache: Default::default(),
+            stale_entries: self.stale_entries,
+            updates: self.updates,
+            counter: self.counter.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +164,26 @@ pub(crate) struct FunctionEntry<'a> {
 impl Function {
     pub fn insert(&mut self, inputs: Vec<Value>, value: Value, timestamp: u32) -> Option<Value> {
         self.insert_raw(FunctionKey::from_vec(inputs), |_, _| value, timestamp)
+    }
+
+    fn fetch_cached_index(&self, spec: TrieSpec, range: Range<u32>) -> Option<Rc<LazyTrie>> {
+        log::trace!("spec={spec:?}");
+        if range.start != 0 {
+            return None;
+        }
+        if self.nodes.len() == self.stale_entries {
+            return None;
+        }
+        debug_assert!(!self.nodes.is_empty());
+        let range = range.start..(self.nodes.last().unwrap().1.timestamp + 1).min(range.end);
+        log::trace!("Returning something (ts={range:?})");
+        Some(
+            self.index_cache
+                .borrow_mut()
+                .entry(spec)
+                .or_insert_with(|| Rc::new(LazyTrie::new(range)))
+                .clone(),
+        )
     }
 
     fn insert_raw(
@@ -244,6 +271,7 @@ impl Function {
         if self.nodes.len() > 8 && self.stale_entries >= (self.nodes.len() / 2) {
             self.nodes.retain(|k, _| k.stale == 0);
             self.stale_entries = 0;
+            self.index_cache.borrow_mut().clear();
         }
     }
 
@@ -369,10 +397,7 @@ impl Function {
     }
 
     pub(crate) fn get_size(&self, range: &Range<u32>) -> usize {
-        self.nodes
-            .values()
-            .filter(|out| range.contains(&out.timestamp))
-            .count()
+        self.iter_timestamp_range(range.clone()).count()
         // if range.start == 0 {
         //     if range.end == u32::MAX {
         //         self.nodes.len()
@@ -397,18 +422,25 @@ impl Function {
         &self,
         range: Range<u32>,
     ) -> impl Iterator<Item = FunctionEntry> {
-        let start =
-            if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.start) {
+        let (start, continue_for) = if range.is_empty() {
+            (0, 0)
+        } else {
+            let start = if let Some(r) =
+                binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.start)
+            {
                 r
             } else {
                 self.nodes.len()
             };
-        let continue_for =
-            if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.end) {
-                r - start
-            } else {
-                self.nodes.len() - start
-            };
+            let continue_for =
+                if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.end) {
+                    debug_assert!(r >= start, "{r} vs {start} ({range:?})");
+                    r - start
+                } else {
+                    self.nodes.len() - start
+                };
+            (start, continue_for)
+        };
         self.nodes
             .iter()
             .enumerate()
@@ -887,6 +919,7 @@ impl EGraph {
             decl: decl.clone(),
             schema: ResolvedSchema { input, output },
             nodes: Default::default(),
+            index_cache: Default::default(),
             stale_entries: 0,
             updates: 0,
             counter: Cell::new(1),
