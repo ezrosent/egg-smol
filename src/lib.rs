@@ -120,7 +120,7 @@ pub struct Function {
     decl: FunctionDecl,
     schema: ResolvedSchema,
     nodes: IndexMap<FunctionKey, TupleOutput>,
-    index_cache: RefCell<HashMap<TrieSpec, Rc<LazyTrie>>>,
+    index_cache: RefCell<HashMap<TrieSpec, ManagedTrie>>,
     stale_entries: usize,
     updates: usize,
     counter: Cell<usize>,
@@ -176,14 +176,13 @@ impl Function {
         }
         debug_assert!(!self.nodes.is_empty());
         let range = range.start..(self.nodes.last().unwrap().1.timestamp + 1).min(range.end);
-        log::trace!("Returning something (ts={range:?})");
-        Some(
-            self.index_cache
-                .borrow_mut()
-                .entry(spec)
-                .or_insert_with(|| Rc::new(LazyTrie::new(range)))
-                .clone(),
-        )
+        log::trace!(
+            "Returning something (ts={range:?}, whole function state={:?})",
+            self.nodes.values().map(|x| x.timestamp).collect::<Vec<_>>()
+        );
+        let mut inner = self.index_cache.borrow_mut();
+        let enclosing = inner.entry(spec).or_insert_with(ManagedTrie::default);
+        Some(enclosing.access_at(self, range))
     }
 
     fn insert_raw(
@@ -397,57 +396,45 @@ impl Function {
     }
 
     pub(crate) fn get_size(&self, range: &Range<u32>) -> usize {
+        // TODO: this can just subtract the indexes
         self.iter_timestamp_range(range.clone()).count()
-        // if range.start == 0 {
-        //     if range.end == u32::MAX {
-        //         self.nodes.len()
-        //     } else {
-        //         // TODO binary search or something
-        //         self.nodes
-        //             .values()
-        //             .filter(|out| out.timestamp < range.end)
-        //             .count()
-        //     }
-        // } else {
-        //     assert_eq!(range.end, u32::MAX);
-        //     self.nodes
-        //         .values()
-        //         .filter(|out| out.timestamp >= range.end)
-        //         .count()
-        // }
+    }
+
+    /// Return the range of indexes into `nodes` corresponding to the given
+    /// timestamp range.
+    pub(crate) fn timestamp_range_to_index_range(&self, range: Range<u32>) -> Range<usize> {
+        if range.is_empty() {
+            return 0..0;
+        }
+        let start =
+            if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.start) {
+                r
+            } else {
+                return 0..0;
+            };
+
+        let end = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.end)
+            .unwrap_or(self.nodes.len());
+        log::trace!(
+            "{range:?} => {start}..{end}, contents={:?}",
+            self.nodes.values().map(|x| x.timestamp).collect::<Vec<_>>()
+        );
+        start..end
     }
 
     /// Iterate over the nodes in the given timestamp range for the function.
     pub(crate) fn iter_timestamp_range(
         &self,
-        range: Range<u32>,
+        ts_range: Range<u32>,
     ) -> impl Iterator<Item = FunctionEntry> {
-        let (start, continue_for) = if range.is_empty() {
-            (0, 0)
-        } else {
-            let start = if let Some(r) =
-                binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.start)
-            {
-                r
-            } else {
-                self.nodes.len()
-            };
-            let continue_for =
-                if let Some(r) = binary_search_by_key(&self.nodes, |v| &v.timestamp, &range.end) {
-                    debug_assert!(r >= start, "{r} vs {start} ({range:?})");
-                    r - start
-                } else {
-                    self.nodes.len() - start
-                };
-            (start, continue_for)
-        };
+        let range = self.timestamp_range_to_index_range(ts_range.clone());
         self.nodes
             .iter()
             .enumerate()
-            .skip(start)
-            .take(continue_for)
+            .skip(range.start)
+            .take(range.end - range.start)
             .filter_map(move |(i, (args, out))| {
-                debug_assert!(range.contains(&out.timestamp));
+                debug_assert!(ts_range.contains(&out.timestamp));
                 if args.stale != 0 {
                     return None;
                 }
@@ -459,20 +446,15 @@ impl Function {
             })
     }
 
-    /// Iterate over the subset of entries in the table at the given indexes
-    /// that fall in the given timestamp range.
-    pub(crate) fn project_from_timestamp_range<'a>(
-        &'a self,
-        ixs: &'a [u32],
-        timestamp_range: Range<u32>,
-    ) -> impl Iterator<Item = FunctionEntry<'a>> {
+    /// Iterate over the subset of entries in the table at the given indexes.
+    pub(crate) fn project<'a>(&'a self, ixs: &'a [u32]) -> impl Iterator<Item = FunctionEntry<'a>> {
         ixs.iter().filter_map(move |x| {
             let index = *x as usize;
             let (args, out) = self
                 .nodes
                 .get_index(index)
                 .expect("index should be in range");
-            if args.stale != 0 || !timestamp_range.contains(&out.timestamp) {
+            if args.stale != 0 {
                 return None;
             }
             Some(FunctionEntry {

@@ -394,6 +394,7 @@ impl EGraph {
     where
         F: FnMut(&[Value]),
     {
+        log::trace!("RUN QUERY ts={timestamp}");
         let has_atoms = !cq.query.atoms.is_empty();
 
         // for the later atoms, we consider everything
@@ -444,20 +445,28 @@ impl EGraph {
                                 .position(|x| x == &AtomTerm::Var(*var))
                                 .map(|x| x as u32)
                         }));
-                        if false {
-                            scratch_writes.push((false, scratch_tmp_tries.len()));
-                            scratch_tmp_tries.push(LazyTrie::new(range.clone()));
+                        if let Some(trie) = f.fetch_cached_index(spec, range.clone()) {
+                            scratch_writes.push((true, scratch_cached_tries.len()));
+                            scratch_cached_tries.push(trie);
                         } else {
-                            if let Some(trie) = f.fetch_cached_index(spec, range.clone()) {
-                                scratch_writes.push((true, scratch_cached_tries.len()));
-                                scratch_cached_tries.push(trie);
-                            } else {
-                                scratch_writes.push((false, scratch_tmp_tries.len()));
-                                scratch_tmp_tries.push(LazyTrie::new(range.clone()));
-                            }
+                            scratch_writes.push((false, scratch_tmp_tries.len()));
+                            let new_trie = LazyTrie::new();
+                            new_trie.add_pending(
+                                f.timestamp_range_to_index_range(range.clone())
+                                    .map(|x| x as RowIdx),
+                            );
+                            scratch_tmp_tries.push(new_trie);
                         }
                     }
-                    log::trace!("scratch_writes={scratch_writes:?}");
+                    log::trace!(
+                        "scratch_writes={scratch_writes:?}, ranges={:?}",
+                        cq.query
+                            .atoms
+                            .iter()
+                            .map(|x| x.head)
+                            .zip(timestamp_ranges.iter())
+                            .collect::<Vec<_>>()
+                    );
                     trie_refs.extend(scratch_writes.iter().map(|(cached, index)| {
                         if *cached {
                             &*scratch_cached_tries[*index]
@@ -490,24 +499,83 @@ impl EGraph {
     }
 }
 
-// TODO(eli): trie caching
-// * Add a timestamp field to LazyTrie (well, it's mutable, so maybe to Inner)
-// * Force needs to handle updating timestamps accordingly (by munging ts
-//   ranges, taking a mutable map in as a param, etc.)
-// * tombstones in Function
-// * functions own their cached tries
-// * binary search for iterators.
+#[derive(Copy, Clone)]
+struct CopyRange {
+    start: u32,
+    end: u32,
+}
+
+impl From<CopyRange> for Range<u32> {
+    fn from(cr: CopyRange) -> Self {
+        cr.start..cr.end
+    }
+}
+impl From<Range<u32>> for CopyRange {
+    fn from(x: Range<u32>) -> Self {
+        CopyRange {
+            start: x.start,
+            end: x.end,
+        }
+    }
+}
+
+pub(crate) struct ManagedTrie {
+    ts_range: Cell<CopyRange>,
+    trie: Rc<LazyTrie>,
+}
+
+impl Default for ManagedTrie {
+    fn default() -> ManagedTrie {
+        ManagedTrie {
+            ts_range: Cell::new((0..0).into()),
+            trie: Rc::new(LazyTrie::new()),
+        }
+    }
+}
+
+impl ManagedTrie {
+    pub(crate) fn access_at(&self, f: &Function, ts_range: Range<u32>) -> Rc<LazyTrie> {
+        // TODO: _Just_ read the indexes out and insert them into pending.
+        // * enum => struct for LazyTrieData
+        // * ignore timestamp in LazyTrieInner  and eventually get rid of it (or rename LazyTrieData)
+        // * force now just checks for nonempty 'delayed'; this actually makes it more uniform
+        log::trace!(
+            "access={ts_range:?}, cur={:?}",
+            Range::from(self.ts_range.get())
+        );
+        let (diff, new) = range_diff(self.ts_range.get().into(), ts_range);
+        log::trace!("diff={diff:?}, new={new:?}");
+        let pending = f.timestamp_range_to_index_range(diff);
+        self.ts_range.set(new.into());
+        self.trie.add_pending(pending.map(|x| x as RowIdx));
+        log::trace!("accessing trie at {:?}", self.trie);
+        self.trie.clone()
+    }
+}
 
 pub(crate) struct LazyTrie(UnsafeCell<LazyTrieInner>);
 
+impl std::fmt::Debug for LazyTrie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe { (&*self.0.get()).fmt(f) }
+    }
+}
+
+// TODO collapse inner and data
 struct LazyTrieInner {
-    ts_range: Range<u32>,
     data: LazyTrieData,
 }
 
-enum LazyTrieData {
-    Delayed(SmallVec<[u32; 4]>),
-    Sparse(SparseMap),
+impl std::fmt::Debug for LazyTrieInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.data.fmt(f)
+    }
+}
+
+#[derive(Debug)]
+struct LazyTrieData {
+    delayed: SmallVec<[u32; 4]>,
+    data: SparseMap,
 }
 
 type SparseMap = HashMap<Value, LazyTrie>;
@@ -517,76 +585,57 @@ impl LazyTrie {
     // CPS wrappers around the interiorly-mutable data: you can still abuse
     // this, but this makes it harder to accidentally introduce an alias.
 
-    unsafe fn with_mut_data<R>(&self, mut f: impl FnMut(&mut LazyTrieData) -> R) -> R {
+    unsafe fn with_mut_data<R>(&self, f: impl FnOnce(&mut LazyTrieData) -> R) -> R {
         f(&mut (*self.0.get()).data)
     }
     unsafe fn with_mut_inner<R>(&self, mut f: impl FnMut(&mut LazyTrieInner) -> R) -> R {
         f(&mut *self.0.get())
     }
+    // TODO: remove
     fn make_initial_vec(ranges: &[Range<u32>]) -> Vec<Self> {
-        ranges.iter().cloned().map(LazyTrie::new).collect()
+        ranges.iter().cloned().map(|_| LazyTrie::new()).collect()
     }
 
-    pub(crate) fn new(ts_range: Range<u32>) -> LazyTrie {
+    fn add_pending(&self, pending: impl Iterator<Item = RowIdx>) {
+        unsafe { self.with_mut_data(move |f| f.delayed.extend(pending)) }
+    }
+
+    pub(crate) fn new() -> LazyTrie {
         LazyTrie(UnsafeCell::new(LazyTrieInner {
-            ts_range,
-            data: LazyTrieData::Delayed(Default::default()),
+            data: LazyTrieData {
+                delayed: Default::default(),
+                data: Default::default(),
+            },
         }))
     }
 
     fn len(&self) -> usize {
-        unsafe {
-            self.with_mut_data(|data| match data {
-                LazyTrieData::Delayed(v) => v.len(),
-                LazyTrieData::Sparse(m) => m.len(),
-            })
-        }
+        unsafe { self.with_mut_data(|data| data.data.len() + data.delayed.len()) }
     }
 
     fn force(&self, access: &TrieAccess) -> &LazyTrieInner {
         unsafe {
             self.with_mut_inner(|this| {
-                if access.timestamp_range == this.ts_range {
-                    if let LazyTrieData::Delayed(idxs) = &this.data {
-                        *this = access.make_trie_inner(idxs);
-                    }
-                } else {
-                    // We've partially initialized at an old timestamp.
-                    let (diff, new) =
-                        range_diff(this.ts_range.clone(), access.timestamp_range.clone());
-                    match &mut this.data {
-                        LazyTrieData::Delayed(idxs) => {
-                            // just use the smallest range we need at the moment.
-                            *this = access.make_trie_explicit_timestamp(idxs, new);
-                        }
-                        LazyTrieData::Sparse(map) => {
-                            log::trace!("new case");
-                            access.initialize_trie_level(&[], diff, map);
-                            this.ts_range = new;
-                        }
-                    }
+                if this.data.delayed.is_empty() {
+                    return;
                 }
+                access.initialize_trie_level(&this.data.delayed, &mut this.data.data);
+                this.data.delayed.clear();
             });
             &*self.0.get()
         }
     }
 
     fn for_each<'a>(&'a self, access: &TrieAccess, mut f: impl FnMut(Value, &'a LazyTrie)) {
-        match &self.force(access).data {
-            LazyTrieData::Sparse(m) => {
-                for (k, v) in m {
-                    f(*k, v)
-                }
-            }
-            LazyTrieData::Delayed(_) => unreachable!(),
+        let forced = &self.force(access).data;
+        for (k, v) in &forced.data {
+            f(*k, v)
         }
     }
 
     fn get(&self, access: &TrieAccess, value: Value) -> Option<&LazyTrie> {
-        match &self.force(access).data {
-            LazyTrieData::Sparse(m) => m.get(&value),
-            LazyTrieData::Delayed(_) => unreachable!(),
-        }
+        let forced = &self.force(access).data;
+        forced.data.get(&value)
     }
 }
 
@@ -605,41 +654,23 @@ impl<'a> std::fmt::Display for TrieAccess<'a> {
 
 impl<'a> TrieAccess<'a> {
     #[cold]
-    // TODO: add timestamp
-    fn make_trie_inner(&self, idxs: &[RowIdx]) -> LazyTrieInner {
-        self.make_trie_explicit_timestamp(idxs, self.timestamp_range.clone())
-    }
-
-    fn make_trie_explicit_timestamp(&self, idxs: &[RowIdx], ts: Range<u32>) -> LazyTrieInner {
-        let mut map = SparseMap::default();
-        self.initialize_trie_level(idxs, ts, &mut map);
-        LazyTrieInner {
-            ts_range: self.timestamp_range.clone(),
-            data: LazyTrieData::Sparse(map),
-        }
-    }
-
-    fn initialize_trie_level(&self, idxs: &[RowIdx], ts_range: Range<u32>, map: &mut SparseMap) {
+    fn initialize_trie_level(&self, idxs: &[RowIdx], map: &mut SparseMap) {
+        log::trace!("initializing {idxs:?}");
         let arity = self.function.schema.input.len();
         let mut insert = |i: usize, tup: &[Value], out: Value, val: Value| {
             use hashbrown::hash_map::Entry;
             // self.timestamp_range.contains(&out.timestamp)
             if self.constraints.iter().all(|c| c.check(tup, out)) {
                 match map.entry(val) {
-                    Entry::Occupied(mut e) => match &mut e.get_mut().0.get_mut().data {
-                        LazyTrieData::Delayed(v) => v.push(i as RowIdx),
-                        LazyTrieData::Sparse(inner) => {
-                            // XXX: is this sufficient? Feels like it isn't
-                            inner
-                                .entry(val)
-                                .or_insert_with(|| LazyTrie::new(self.timestamp_range.clone()));
-                            todo!()
-                        }
-                    },
+                    Entry::Occupied(mut e) => {
+                        e.get_mut().0.get_mut().data.delayed.push(i as RowIdx)
+                    }
                     Entry::Vacant(e) => {
                         e.insert(LazyTrie(UnsafeCell::new(LazyTrieInner {
-                            ts_range: self.timestamp_range.clone(),
-                            data: LazyTrieData::Delayed(smallvec::smallvec![i as RowIdx]),
+                            data: LazyTrieData {
+                                delayed: smallvec::smallvec![i as RowIdx],
+                                data: Default::default(),
+                            },
                         })));
                     }
                 }
@@ -647,46 +678,36 @@ impl<'a> TrieAccess<'a> {
         };
 
         if idxs.is_empty() {
+            log::trace!(
+                "standard initialization, ts_range={:?}",
+                self.timestamp_range
+            );
             if self.column < arity {
-                for FunctionEntry { index, inputs, out } in
-                    self.function.iter_timestamp_range(ts_range)
+                for FunctionEntry { index, inputs, out } in self
+                    .function
+                    .iter_timestamp_range(self.timestamp_range.clone())
                 {
                     insert(index, inputs, out, inputs[self.column])
                 }
             } else {
                 assert_eq!(self.column, arity);
-                for FunctionEntry { index, inputs, out } in
-                    self.function.iter_timestamp_range(ts_range)
+                for FunctionEntry { index, inputs, out } in self
+                    .function
+                    .iter_timestamp_range(self.timestamp_range.clone())
                 {
-                    insert(index, inputs, out, out);
+                    insert(index, inputs, out, out)
                 }
-            };
+            }
         } else if self.column < arity {
-            for FunctionEntry { index, inputs, out } in
-                self.function.project_from_timestamp_range(idxs, ts_range)
-            {
+            for FunctionEntry { index, inputs, out } in self.function.project(idxs) {
                 insert(index, inputs, out, inputs[self.column])
             }
         } else {
             assert_eq!(self.column, arity);
-            for FunctionEntry { index, inputs, out } in
-                self.function.project_from_timestamp_range(idxs, ts_range)
-            {
+            for FunctionEntry { index, inputs, out } in self.function.project(idxs) {
                 insert(index, inputs, out, out)
             }
         }
-
-        // // Density test
-        // if !map.is_empty() {
-        //     let min = map.keys().map(|v| v.bits).min().unwrap();
-        //     let max = map.keys().map(|v| v.bits).max().unwrap();
-        //     let len = map.len();
-        //     if max - min <= len as u64 * 2 {
-        //         println!("Trie is dense with len {len}!");
-        //     } else {
-        //         println!("Trie is not dense with len {len}!");
-        //     }
-        // }
     }
 }
 
