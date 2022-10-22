@@ -403,30 +403,6 @@ impl Function {
         start..end
     }
 
-    /// Iterate over the nodes in the given timestamp range for the function.
-    pub(crate) fn iter_timestamp_range(
-        &self,
-        ts_range: Range<u32>,
-    ) -> impl Iterator<Item = FunctionEntry> {
-        let range = self.timestamp_range_to_index_range(ts_range.clone());
-        self.nodes
-            .iter()
-            .enumerate()
-            .skip(range.start)
-            .take(range.end - range.start)
-            .filter_map(move |(i, (args, out))| {
-                debug_assert!(ts_range.contains(&out.timestamp));
-                if args.stale() {
-                    return None;
-                }
-                Some(FunctionEntry {
-                    index: i,
-                    inputs: args.vals(),
-                    out: out.value,
-                })
-            })
-    }
-
     /// Iterate over the subset of entries in the table at the given indexes.
     pub(crate) fn project<'a>(&'a self, ixs: &'a [u32]) -> impl Iterator<Item = FunctionEntry<'a>> {
         ixs.iter().filter_map(move |x| {

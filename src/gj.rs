@@ -285,12 +285,7 @@ impl EGraph {
         CompiledQuery { query, vars }
     }
 
-    fn make_trie_access(
-        &self,
-        var: Symbol,
-        atom: &Atom<Symbol>,
-        timestamp_range: Range<u32>,
-    ) -> TrieAccess {
+    fn make_trie_access(&self, var: Symbol, atom: &Atom<Symbol>) -> TrieAccess {
         let column = atom
             .args
             .iter()
@@ -313,7 +308,6 @@ impl EGraph {
 
         TrieAccess {
             function,
-            timestamp_range,
             column,
             constraints,
         }
@@ -394,8 +388,7 @@ impl EGraph {
                         .iter()
                         .map(|&atom_idx| {
                             let atom = &atoms[atom_idx];
-                            let range = timestamp_ranges[atom_idx].clone();
-                            let access = self.make_trie_access(v, atom, range);
+                            let access = self.make_trie_access(v, atom);
                             (atom_idx, access)
                         })
                         .collect(),
@@ -448,83 +441,87 @@ impl EGraph {
 
         // for the later atoms, we consider everything
         let mut timestamp_ranges = vec![0..u32::MAX; cq.query.atoms.len()];
-        if has_atoms {
-            let mut scratch_tmp_tries = SmallVec::<[_; 4]>::new();
-            let mut scratch_cached_tries = SmallVec::<[_; 4]>::new();
-            let mut scratch_writes = SmallVec::<[_; 4]>::new();
-            let mut cache_keys = SmallVec::<[_; 4]>::new();
-            let do_seminaive = true;
-            for (atom_i, atom) in cq.query.atoms.iter().enumerate() {
-                // this time, we only consider "new stuff" for this atom
-                if do_seminaive {
-                    timestamp_ranges[atom_i] = timestamp..u32::MAX;
-                }
-
-                // do the gj
-                if let Some((mut ctx, program)) = Context::new(self, cq, &timestamp_ranges) {
-                    scratch_tmp_tries.clear();
-                    scratch_cached_tries.clear();
-                    scratch_writes.clear();
-                    cache_keys.clear();
-                    program.trie_accesses(&mut cache_keys);
-                    assert_eq!(cache_keys.len(), cq.query.atoms.len());
-                    let mut trie_refs = Vec::with_capacity(cq.query.atoms.len());
-                    log::debug!(
-                        "Query: {}\nNew atom: {}\nVars: {}\nProgram\n{:?}",
-                        cq.query,
-                        atom,
-                        ListDisplay(cq.vars.keys(), " "),
-                        program
-                    );
-                    for ((atom, range), spec) in cq
-                        .query
-                        .atoms
-                        .iter()
-                        .zip(timestamp_ranges.iter())
-                        .zip(cache_keys.iter())
-                    {
-                        let f = self.functions.get(&atom.head).unwrap();
-                        if let Some(trie) = f.fetch_cached_index(spec.clone(), range.clone()) {
-                            scratch_writes.push((true, scratch_cached_tries.len()));
-                            scratch_cached_tries.push(trie);
-                        } else {
-                            scratch_writes.push((false, scratch_tmp_tries.len()));
-                            let new_trie = LazyTrie::new();
-                            new_trie.add_pending(
-                                f.timestamp_range_to_index_range(range.clone())
-                                    .map(|x| x as RowIdx),
-                            );
-                            scratch_tmp_tries.push(new_trie);
-                        }
-                    }
-                    trie_refs.extend(scratch_writes.iter().map(|(cached, index)| {
-                        if *cached {
-                            &*scratch_cached_tries[*index]
-                        } else {
-                            &scratch_tmp_tries[*index]
-                        }
-                    }));
-                    // Want to look up the cached tries on the fly here.
-                    // Backing `tries` in a smallvec for anything that we can't
-                    // cache, then grab the rcs, insert into trie_refs in
-                    // sequence. Need to compute variable order and we're good?
-                    // Where do the constraints come in.
-                    ctx.eval(&mut trie_refs, &program.0, &mut f);
-                    log::debug!("Matched {} times", ctx.matches);
-                }
-
-                if !do_seminaive {
-                    break;
-                }
-
-                // now we can fix this atom to be "old stuff" only
-                // range is half-open; timestamp is excluded
-                timestamp_ranges[atom_i] = 0..timestamp;
+        if !has_atoms {
+            if let Some((mut ctx, program)) = Context::new(self, cq, &[]) {
+                // let tries = LazyTrie::make_initial_vec(timestamp_ranges.len());
+                // let mut trie_refs = tries.iter().collect::<Vec<_>>();
+                ctx.eval(&mut [], &program.0, &mut f)
             }
-        } else if let Some((mut ctx, program)) = Context::new(self, cq, &[]) {
-            let tries = LazyTrie::make_initial_vec(timestamp_ranges.len());
-            let mut trie_refs = tries.iter().collect::<Vec<_>>();
-            ctx.eval(&mut trie_refs, &program.0, &mut f)
+        }
+        // scratch variables
+        let mut scratch_tmp_tries = SmallVec::<[_; 4]>::new();
+        let mut scratch_cached_tries = SmallVec::<[_; 4]>::new();
+        let mut scratch_writes = SmallVec::<[_; 4]>::new();
+        let mut cache_keys = SmallVec::<[_; 4]>::new();
+        let do_seminaive = true;
+        for (atom_i, atom) in cq.query.atoms.iter().enumerate() {
+            // this time, we only consider "new stuff" for this atom
+            if do_seminaive {
+                timestamp_ranges[atom_i] = timestamp..u32::MAX;
+            }
+
+            // do the gj
+            if let Some((mut ctx, program)) = Context::new(self, cq, &timestamp_ranges) {
+                scratch_tmp_tries.clear();
+                scratch_cached_tries.clear();
+                scratch_writes.clear();
+                cache_keys.clear();
+                // Compute keys to look up in the trie cache.
+                program.trie_accesses(&mut cache_keys);
+                assert_eq!(cache_keys.len(), cq.query.atoms.len());
+                let mut trie_refs = Vec::with_capacity(cq.query.atoms.len());
+                log::debug!(
+                    "Query: {}\nNew atom: {}\nVars: {}\nProgram\n{:?}",
+                    cq.query,
+                    atom,
+                    ListDisplay(cq.vars.keys(), " "),
+                    program
+                );
+                for ((atom, range), spec) in cq
+                    .query
+                    .atoms
+                    .iter()
+                    .zip(timestamp_ranges.iter())
+                    .zip(cache_keys.iter())
+                {
+                    let f = self.functions.get(&atom.head).unwrap();
+                    // Attempt to use a cached index. This won't always
+                    // succeed (e.g. for timestamps that start at 0).
+                    if let Some(trie) = f.fetch_cached_index(spec.clone(), range.clone()) {
+                        scratch_writes.push((true, scratch_cached_tries.len()));
+                        scratch_cached_tries.push(trie);
+                    } else {
+                        scratch_writes.push((false, scratch_tmp_tries.len()));
+                        // Initialize a fresh LazyTrie with the indexes
+                        // corresponding to the given timestamp range.
+                        let new_trie = LazyTrie::new();
+                        new_trie.add_pending(
+                            f.timestamp_range_to_index_range(range.clone())
+                                .map(|x| x as RowIdx),
+                        );
+                        scratch_tmp_tries.push(new_trie);
+                    }
+                }
+                // Use either a fresh or cached trie depending on the cache
+                // lookups performe din the loop above.
+                trie_refs.extend(scratch_writes.iter().map(|(cached, index)| {
+                    if *cached {
+                        &*scratch_cached_tries[*index]
+                    } else {
+                        &scratch_tmp_tries[*index]
+                    }
+                }));
+                ctx.eval(&mut trie_refs, &program.0, &mut f);
+                log::debug!("Matched {} times", ctx.matches);
+            }
+
+            if !do_seminaive {
+                break;
+            }
+
+            // now we can fix this atom to be "old stuff" only
+            // range is half-open; timestamp is excluded
+            timestamp_ranges[atom_i] = 0..timestamp;
         }
     }
 }
@@ -604,10 +601,6 @@ impl LazyTrie {
         f(&mut *self.0.get())
     }
 
-    fn make_initial_vec(n: usize) -> Vec<Self> {
-        (0..n).map(|_| LazyTrie::new()).collect()
-    }
-
     fn add_pending(&self, pending: impl Iterator<Item = RowIdx>) {
         unsafe { self.with_mut_inner(move |f| f.delayed.extend(pending)) }
     }
@@ -649,7 +642,6 @@ impl LazyTrie {
 
 struct TrieAccess<'a> {
     function: &'a Function,
-    timestamp_range: Range<u32>,
     column: usize,
     constraints: Vec<Constraint>,
 }
@@ -690,24 +682,7 @@ impl<'a> TrieAccess<'a> {
             }
         };
 
-        if idxs.is_empty() {
-            if self.column < arity {
-                for FunctionEntry { index, inputs, out } in self
-                    .function
-                    .iter_timestamp_range(self.timestamp_range.clone())
-                {
-                    insert(index, inputs, out, inputs[self.column])
-                }
-            } else {
-                assert_eq!(self.column, arity);
-                for FunctionEntry { index, inputs, out } in self
-                    .function
-                    .iter_timestamp_range(self.timestamp_range.clone())
-                {
-                    insert(index, inputs, out, out)
-                }
-            }
-        } else if self.column < arity {
+        if self.column < arity {
             for FunctionEntry { index, inputs, out } in self.function.project(idxs) {
                 insert(index, inputs, out, inputs[self.column])
             }
