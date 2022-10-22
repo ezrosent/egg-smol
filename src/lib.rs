@@ -164,7 +164,6 @@ pub(crate) struct FunctionEntry<'a> {
 
 impl Function {
     pub fn insert(&mut self, inputs: Vec<Value>, value: Value, timestamp: u32) -> Option<Value> {
-        // self.insert_raw(FunctionKey::from_vec(inputs), |_, _| value, timestamp)
         enum Action {
             Done(Option<Value>),
             Repair {
@@ -261,10 +260,13 @@ impl Function {
         }
     }
 
+    /// Rebuild while maintaining the invariant that the `nodes` indexmap is
+    /// sorted by timestamp.
     pub fn rebuild(&mut self, uf: &mut UnionFind, timestamp: u32) -> usize {
         if self.schema.input.iter().all(|s| !s.is_eq_sort()) && !self.schema.output.is_eq_sort() {
             return mem::take(&mut self.updates);
         }
+
         // FIXME this doesn't compute updates properly
         let n_unions = uf.n_unions();
         let mut scratch = Vec::new();
@@ -293,7 +295,7 @@ impl Function {
                 continue;
             }
             // The canonical representation changed. We need to reinsert and perhaps do a merge.
-            // 1. swap in a tombstone
+            // 1. swap in a tombstone for the current entry.
             let tombstone = self.tombstone();
             assert!(self.nodes.insert(tombstone, output.clone()).is_none());
             self.stale_entries += 1;
@@ -313,11 +315,12 @@ impl Function {
                     if self.schema.output.is_eq_sort() {
                         let next_val = uf.union_values(o.get().value, ret);
                         let prev_ts = o.get().timestamp;
-                        if prev_ts == timestamp {
-                            // Timestamps match, we can update in place
+                        if prev_ts == timestamp || next_val == o.get().value {
                             o.get_mut().value = next_val;
                             None
                         } else {
+                            // We need to tombstone _this_ entry too, but we
+                            // need to drop the borrow of `nodes` first.
                             Some(RemoveAndInsert {
                                 index: o.index(),
                                 inputs: o.key().clone(),
@@ -349,29 +352,25 @@ impl Function {
             {
                 // Tombstone the entry that we will merge in
                 let tombstone = self.tombstone();
-                assert!(self
-                    .nodes
-                    .insert(
-                        tombstone,
-                        TupleOutput {
-                            value: output,
-                            timestamp: prev_ts
-                        }
-                    )
-                    .is_none());
+                let _was = self.nodes.insert(
+                    tombstone,
+                    TupleOutput {
+                        value: output,
+                        timestamp: prev_ts,
+                    },
+                );
+                debug_assert!(_was.is_none());
                 self.nodes.swap_remove_index(index).unwrap();
                 self.stale_entries += 1;
                 // Add the newly-merged tuple to the end of the map
-                assert!(self
-                    .nodes
-                    .insert(
-                        inputs,
-                        TupleOutput {
-                            value: output,
-                            timestamp
-                        }
-                    )
-                    .is_none());
+                let _was = self.nodes.insert(
+                    inputs,
+                    TupleOutput {
+                        value: output,
+                        timestamp,
+                    },
+                );
+                debug_assert!(_was.is_none());
             }
             scratch = prev.inputs;
         }
