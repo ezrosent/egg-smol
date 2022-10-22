@@ -134,8 +134,6 @@ impl<'b> Context<'b> {
                 value_idx,
                 trie_accesses,
             } => {
-                #[cfg(feature = "dhat-ad-hoc")]
-                dhat::ad_hoc_event(trie_accesses.len());
                 match trie_accesses.as_slice() {
                     [(j, access)] => tries[*j].for_each(access, |value, trie| {
                         let old_trie = std::mem::replace(&mut tries[*j], trie);
@@ -503,7 +501,7 @@ impl EGraph {
                     }
                 }
                 // Use either a fresh or cached trie depending on the cache
-                // lookups performe din the loop above.
+                // lookups performed in the loop above.
                 trie_refs.extend(scratch_writes.iter().map(|(cached, index)| {
                     if *cached {
                         &*scratch_cached_tries[*index]
@@ -526,6 +524,7 @@ impl EGraph {
     }
 }
 
+/// A version of Range<u32> that implements copy (so we can use it in Cell)
 #[derive(Copy, Clone)]
 struct CopyRange {
     start: u32,
@@ -565,10 +564,6 @@ impl Default for CachedTrie {
 
 impl CachedTrie {
     pub(crate) fn access_at(&self, f: &Function, ts_range: Range<u32>) -> Rc<LazyTrie> {
-        // TODO: _Just_ read the indexes out and insert them into pending.
-        // * enum => struct for LazyTrieData
-        // * ignore timestamp in LazyTrieInner  and eventually get rid of it (or rename LazyTrieData)
-        // * force now just checks for nonempty 'delayed'; this actually makes it more uniform
         let (diff, new) = range_diff(self.ts_range.get().into(), ts_range);
         let pending = f.timestamp_range_to_index_range(diff);
         self.ts_range.set(new.into());
@@ -668,7 +663,6 @@ impl<'a> TrieAccess<'a> {
         let arity = self.function.schema.input.len();
         let mut insert = |i: usize, tup: &[Value], out: Value, val: Value| {
             use hashbrown::hash_map::Entry;
-            // self.timestamp_range.contains(&out.timestamp)
             if self.constraints.iter().all(|c| c.check(tup, out)) {
                 match map.entry(val) {
                     Entry::Occupied(mut e) => e.get_mut().0.get_mut().delayed.push(i as RowIdx),

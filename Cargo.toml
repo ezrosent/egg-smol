@@ -9,7 +9,6 @@ members = [".", "web-demo"]
 [features]
 default = []
 wasm-bindgen = ["instant/wasm-bindgen"]
-dhat-ad-hoc = ["dep:dhat"]
 
 [dependencies]
 hashbrown = "0.12"
@@ -32,7 +31,6 @@ regex = "1"
 # binary dependencies
 clap = {version = "4", features = ["derive"]}
 env_logger = "0.9"
-dhat = {version = "0.3", optional = true}
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
