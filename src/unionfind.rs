@@ -42,6 +42,11 @@ impl UnionFind {
         self.staged_ids.values_mut().for_each(Vec::clear);
     }
 
+    pub fn new_ids(&self) -> usize {
+        let please_document = 1;
+        self.recent_ids.values().map(Vec::len).sum()
+    }
+
     /// Iterate over the ids of the given sort marked as "dirty", i.e. any
     /// [`Id`]s that ceased to be canonical between the last call to
     /// [`clear_recent_ids`] and the call prior to that.
