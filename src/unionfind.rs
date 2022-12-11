@@ -42,8 +42,11 @@ impl UnionFind {
         self.staged_ids.values_mut().for_each(Vec::clear);
     }
 
+    /// Get the number of ids that are no longer canonical, as of the last call
+    /// to [`clear_recent_ids`].
+    ///
+    /// [`clear_recent_ids`]: UnionFind::clear_recent_ids
     pub fn new_ids(&self) -> usize {
-        let please_document = 1;
         self.recent_ids.values().map(Vec::len).sum()
     }
 

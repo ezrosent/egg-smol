@@ -179,8 +179,13 @@ impl Function {
     pub fn insert(&mut self, inputs: &[Value], value: Value, timestamp: u32) -> Option<Value> {
         self.insert_internal(inputs, value, timestamp, true)
     }
+
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.clear_metadata();
+    }
+
+    fn clear_metadata(&mut self) {
         self.indexes
             .iter_mut()
             .for_each(|x| Rc::make_mut(x).clear());
@@ -303,15 +308,8 @@ impl Function {
             return;
         }
 
-        for index in &mut self.indexes {
-            // Everything works if we don't have a unique copy of the indexes,
-            // but we ought to be able to avoid this copy.
-            Rc::make_mut(index).clear();
-        }
         self.nodes.retain(|k, _| k.live());
-        self.n_stale = 0;
-        self.counter = 0;
-        self.index_updated_through = 0;
+        self.clear_metadata();
         self.update_indexes(self.nodes.len());
     }
 
@@ -330,58 +328,70 @@ impl Function {
         })
     }
 
-    fn rebuild_full(
-        &mut self,
-        uf: &mut UnionFind,
-        ts: u32,
-        to_rebuild: &mut HashSet<usize>,
-    ) -> usize {
+    fn rebuild_full(&mut self, uf: &mut UnionFind, ts: u32) -> usize {
         // Incremental rebuilding (and "staleness" calculations in general) only
         // help when a relatively small fraction of rows will need to be
         // canonicalized, but we can easily get scenarios in which most of the
         // table has to be rebuilt. In that setting, we're better off
         // re-indexing and rebuilding the entire table.
+
         let n_unions = uf.n_unions();
-        let mut i = 0;
-        let mut to_add = Vec::with_capacity(to_rebuild.len());
+        let mut to_add = Vec::with_capacity(self.nodes.len() / 2);
+        let mut scratch = SmallVec::<[Value; 3]>::new();
+
+        // Remove all tuples that aren't live, or that are no longer canonical.
         self.nodes.retain(|inp, out| {
             if !inp.live() {
-                i += 1;
                 return false;
             }
-            let keep = !to_rebuild.contains(&i);
-            i += 1;
-            if !keep {
-                to_add.push((inp.data.clone(), out.value))
-            }
-            keep
-        });
-        'outer: for (mut args, mut out) in to_add.drain(..) {
-            args.iter_mut()
-                .zip(self.schema.input.iter())
-                .for_each(|(v, sort)| {
-                    if sort.is_eq_sort() {
-                        *v = uf.find_value(*v);
+            scratch.clear();
+            let mut changed = false;
+            for (i, sort) in inp.data().iter().zip(self.schema.input.iter()) {
+                if sort.is_eq_sort() {
+                    let new = uf.find_value(*i);
+                    if new.bits != i.bits {
+                        changed = true;
+                        scratch.push(new);
+                        continue;
                     }
-                });
-            if self.schema.output.is_eq_sort() {
-                out = uf.find_value(out);
+                }
+                scratch.push(*i);
             }
+            if self.schema.output.is_eq_sort() {
+                let new = uf.find_value(out.value);
+                if new.bits != out.value.bits {
+                    changed = true;
+                    out.value = new;
+                }
+            }
+            if changed {
+                to_add.push((mem::take(&mut scratch), out.value))
+            }
+            !changed
+        });
+
+        // Recanonicalize the stale tuples and insert them at `timestamp`.
+        'outer: for (mut args, mut out) in to_add.drain(..) {
             loop {
                 // NB: this only has to happen twice. We need to reinsert in
-                // order to keep the "sorted timestamps" invariant
+                // order to keep the "sorted timestamps" invariant.
                 let (to_stale, new_key, new_val) = match self.nodes.entry(Input::new(args)) {
                     IEntry::Occupied(mut o) => {
                         let TupleOutput { value, timestamp } = o.get_mut();
                         if value.bits == out.bits {
                             continue 'outer;
                         }
-                        let new_out = uf.union_values(*value, out, value.tag);
-                        if *timestamp == ts {
-                            *value = new_out;
+                        if self.schema.output.is_eq_sort() {
+                            let new_out = uf.union_values(*value, out, value.tag);
+                            if *timestamp == ts {
+                                *value = new_out;
+                                continue 'outer;
+                            }
+                            (o.index(), o.key().data.clone(), new_out)
+                        } else {
+                            // TODO: call the merge fn!
                             continue 'outer;
                         }
-                        (o.index(), o.key().data.clone(), new_out)
                     }
                     IEntry::Vacant(v) => {
                         v.insert(TupleOutput {
@@ -396,36 +406,29 @@ impl Function {
                 out = new_val;
             }
         }
-        for index in &mut self.indexes {
-            // Everything works if we don't have a unique copy of the indexes,
-            // but we ought to be able to avoid this copy.
-            Rc::make_mut(index).clear();
-        }
-        self.n_stale = 0;
-        self.counter = 0;
-        self.index_updated_through = 0;
-        self.update_indexes(self.nodes.len());
+
+        self.clear_metadata();
         self.maybe_rehash();
+        self.update_indexes(self.nodes.len());
         uf.n_unions() - n_unions + std::mem::take(&mut self.updates)
     }
 
     pub fn rebuild(&mut self, uf: &mut UnionFind, timestamp: u32) -> usize {
         // Make sure indexes are up to date.
         self.update_indexes(self.nodes.len());
-        if self.schema.input.iter().all(|s| !s.is_eq_sort()) && !self.schema.output.is_eq_sort() {
+        let new_ids = uf.new_ids();
+        if new_ids == 0
+            || (self.schema.input.iter().all(|s| !s.is_eq_sort())
+                && !self.schema.output.is_eq_sort())
+        {
             return std::mem::take(&mut self.updates);
+        }
+        if new_ids > (self.nodes.len() / 2) {
+            return self.rebuild_full(uf, timestamp);
         }
         let mut to_canon = mem::take(&mut self.scratch);
         to_canon.clear();
         to_canon.extend(self.indexes.iter().flat_map(|x| x.to_canonicalize(uf)));
-
-        // TODO: "hybrid" classic/incremental rebuilding
-
-        if to_canon.len() > (self.nodes.len() / 2) {
-            let res = self.rebuild_full(uf, timestamp, &mut to_canon);
-            self.scratch = to_canon;
-            return res;
-        }
 
         let n_unions = uf.n_unions();
         let mut scratch = ValueVec::new();
