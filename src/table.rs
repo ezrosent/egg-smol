@@ -29,11 +29,9 @@ use std::{
     hash::{BuildHasher, Hash, Hasher},
     mem,
     ops::Range,
-    ptr::{self},
 };
 
 use hashbrown::raw::RawTable;
-use static_assertions::const_assert;
 
 use crate::{
     binary_search::binary_search_table_by_key, util::BuildHasher as BH, TupleOutput, Value,
@@ -48,64 +46,6 @@ struct TableOffset {
     // probing, and to avoid `values` lookups entirely during insertions.
     hash: u64,
     off: Offset,
-}
-
-struct TupleHeader {
-    write_ts: u32,
-    stale_ts: u32,
-    out: Value,
-}
-
-impl TupleHeader {
-    const fn size_of_entry(arity: usize) -> usize {
-        const_assert!(mem::align_of::<TupleHeader>() == mem::align_of::<Value>());
-        mem::size_of::<TupleHeader>() + (arity * mem::size_of::<Value>())
-    }
-}
-
-struct FlatVec {
-    arity: usize,
-    len: usize,
-    capacity: usize,
-    data: *mut TupleHeader,
-}
-
-impl FlatVec {
-    fn new(arity: usize) -> FlatVec {
-        FlatVec {
-            arity,
-            len: 0,
-            capacity: 0,
-            data: ptr::null_mut(),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    fn push(&mut self, ts: u32, ins: &[Value], out: Value) {
-        assert_eq!(ins.len(), self.arity);
-        if self.len == self.capacity {
-            self.grow();
-        }
-        let raw = self.data as *mut u8;
-        unsafe {
-            let addr = raw.add(TupleHeader::size_of_entry(self.arity) * self.len);
-            let header = addr as *mut TupleHeader;
-            header.write(TupleHeader {
-                write_ts: ts,
-                stale_ts: !0,
-                out,
-            });
-            let dst = addr.add(mem::size_of::<TupleHeader>());
-            ptr::copy_nonoverlapping(ins.as_ptr(), dst as *mut Value, self.arity);
-        }
-    }
-
-    fn grow(&mut self) {
-        todo!()
-    }
 }
 
 #[derive(Default, Clone)]
