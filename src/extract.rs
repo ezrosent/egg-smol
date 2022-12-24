@@ -89,7 +89,7 @@ impl<'a> Extractor<'a> {
             let (cost, node) = &self
                 .costs
                 .get(&id)
-                .unwrap_or_else(|| panic!("No cost for {:?}", value));
+                .unwrap_or_else(|| panic!("No cost for {value:?}"));
             (*cost, self.expr_from_node(node))
         } else {
             (0, sort.make_expr(value))

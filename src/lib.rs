@@ -678,7 +678,7 @@ impl EGraph {
         let mut buf = String::new();
         let s = &mut buf;
         for (ins, out) in nodes {
-            write!(s, "({}", sym).unwrap();
+            write!(s, "({sym}").unwrap();
             for (a, t) in ins.iter().copied().zip(&schema.input) {
                 s.push(' ');
                 let e = if t.is_eq_sort() {
@@ -686,7 +686,7 @@ impl EGraph {
                 } else {
                     t.make_expr(a)
                 };
-                write!(s, "{}", e).unwrap();
+                write!(s, "{e}").unwrap();
             }
 
             if out_is_unit {
@@ -697,7 +697,7 @@ impl EGraph {
                 } else {
                     schema.output.make_expr(out.value)
                 };
-                write!(s, ") -> {}", e).unwrap();
+                write!(s, ") -> {e}").unwrap();
             }
             s.push('\n');
             // write!(s, "{}(", self.decl.name)?;
@@ -917,7 +917,7 @@ impl EGraph {
     }
 
     pub fn add_rule(&mut self, rule: ast::Rule) -> Result<Symbol, Error> {
-        let name = format!("{}", rule);
+        let name = format!("{rule}");
         self.add_rule_with_name(name, rule)
     }
 
@@ -1122,12 +1122,12 @@ impl EGraph {
             }
             Command::Print(f, n) => {
                 let msg = self.print_function(f, n)?;
-                println!("{}", msg);
+                println!("{msg}");
                 msg
             }
             Command::PrintSize(f) => {
                 let msg = self.print_size(f)?;
-                println!("{}", msg);
+                println!("{msg}");
                 msg
             }
             Command::Include(file) => {
@@ -1147,12 +1147,12 @@ impl EGraph {
                 for t in &func.schema.input {
                     match t.name().as_str() {
                         "i64" | "String" => {}
-                        s => panic!("Unsupported type {} for input", s),
+                        s => panic!("Unsupported type {s} for input"),
                     }
                 }
                 match func.schema.output.name().as_str() {
                     "i64" | "String" | "Unit" => {}
-                    s => panic!("Unsupported type {} for input", s),
+                    s => panic!("Unsupported type {s} for input"),
                 }
 
                 log::info!("Opening file '{:?}'...", filename);

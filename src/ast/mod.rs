@@ -162,12 +162,12 @@ pub enum Action {
 impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Action::Let(lhs, rhs) => write!(f, "(define {} {})", lhs, rhs),
+            Action::Let(lhs, rhs) => write!(f, "(define {lhs} {rhs})"),
             Action::Set(lhs, args, rhs) => {
                 write!(f, "(set ({} {}) {})", lhs, ListDisplay(args, " "), rhs)
             }
-            Action::Union(lhs, rhs) => write!(f, "(union {} {})", lhs, rhs),
-            Action::Panic(msg) => write!(f, "(panic {})", msg),
+            Action::Union(lhs, rhs) => write!(f, "(union {lhs} {rhs})"),
+            Action::Panic(msg) => write!(f, "(panic {msg})"),
             Action::Expr(e) => Display::fmt(e, f),
             Action::Delete(sym, args) => write!(f, "(delete ({} {}))", sym, ListDisplay(args, " ")),
             // Action::If(cond, then, else_) => write!(f, "(if {} {} {})", cond, then, else_),

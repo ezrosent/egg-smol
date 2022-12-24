@@ -93,9 +93,9 @@ impl Display for Expr {
             Expr::Lit(lit) => Display::fmt(lit, f),
             Expr::Var(var) => Display::fmt(var, f),
             Expr::Call(op, args) => {
-                write!(f, "({}", op)?;
+                write!(f, "({op}")?;
                 for arg in args {
-                    write!(f, " {}", arg)?;
+                    write!(f, " {arg}")?;
                 }
                 write!(f, ")")
             }

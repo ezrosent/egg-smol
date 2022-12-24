@@ -61,7 +61,7 @@ pub enum AtomTerm {
 impl std::fmt::Display for AtomTerm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AtomTerm::Var(v) => write!(f, "{}", v),
+            AtomTerm::Var(v) => write!(f, "{v}"),
             AtomTerm::Value(_) => write!(f, "<value>"),
         }
     }
@@ -146,7 +146,7 @@ impl<'a> Context<'a> {
                 ENode::Literal(lit) => {
                     let old = leaves.insert(id, AtomTerm::Value(self.egraph.eval_lit(lit)));
                     if let Some(AtomTerm::Value(old)) = old {
-                        panic!("Duplicate literal: {:?} {:?}", old, lit);
+                        panic!("Duplicate literal: {old:?} {lit:?}");
                     }
                 }
                 ENode::Var(var) => {
@@ -157,7 +157,7 @@ impl<'a> Context<'a> {
         }
 
         let get_leaf = |id: &Id| -> AtomTerm {
-            let mk = || AtomTerm::Var(Symbol::from(format!("?__{}", id)));
+            let mk = || AtomTerm::Var(Symbol::from(format!("?__{id}")));
             leaves.get(id).cloned().unwrap_or_else(mk)
         };
 
@@ -683,7 +683,7 @@ impl EGraph {
                         }
                     } else {
                         return Err(Error::NotFoundError(NotFoundError(Expr::Var(
-                            format!("fake expression {f} {:?}", values).into(),
+                            format!("fake expression {f} {values:?}").into(),
                         ))));
                     };
                     stack.truncate(new_len);
@@ -755,7 +755,7 @@ impl EGraph {
                     });
                     stack.truncate(new_len);
                 }
-                Instruction::Panic(msg) => panic!("Panic: {}", msg),
+                Instruction::Panic(msg) => panic!("Panic: {msg}"),
                 Instruction::Literal(lit) => match lit {
                     Literal::Int(i) => stack.push(Value::from(*i)),
                     Literal::String(s) => stack.push(Value::from(*s)),

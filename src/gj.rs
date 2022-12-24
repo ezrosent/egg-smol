@@ -37,14 +37,14 @@ impl<'a> std::fmt::Display for Program<'a> {
                     value_idx,
                     trie_accesses,
                 } => {
-                    write!(f, " Intersect @ {} ", value_idx)?;
+                    write!(f, " Intersect @ {value_idx} ")?;
                     for (trie_idx, a) in trie_accesses {
-                        write!(f, "  {}: {}", trie_idx, a)?;
+                        write!(f, "  {trie_idx}: {a}")?;
                     }
                     writeln!(f)?
                 }
                 Instr::Call { prim, args, check } => {
-                    writeln!(f, " Call {:?} {:?} {:?}", prim, args, check)?;
+                    writeln!(f, " Call {prim:?} {args:?} {check:?}")?;
                 }
             }
         }
@@ -359,7 +359,7 @@ impl EGraph {
             .iter()
             .map(|(&v, info)| {
                 let idx = query.vars.get_index_of(&v).unwrap_or_else(|| {
-                    panic!("variable {} not found in query", v);
+                    panic!("variable {v} not found in query");
                 });
                 Instr::Intersect {
                     value_idx: idx,
