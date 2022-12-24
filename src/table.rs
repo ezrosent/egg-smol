@@ -26,10 +26,12 @@
 //! It's likely that we will have to store these "on the side" or use some sort
 //! of persistent data-structure for the entire table.
 use std::{
+    alloc::{realloc, Layout},
     hash::{BuildHasher, Hash, Hasher},
     mem,
     ops::Range,
     ptr::{self},
+    slice,
 };
 
 use hashbrown::raw::RawTable;
@@ -67,7 +69,7 @@ struct FlatVec {
     arity: usize,
     len: usize,
     capacity: usize,
-    data: *mut TupleHeader,
+    data: *mut u8,
 }
 
 impl FlatVec {
@@ -91,20 +93,89 @@ impl FlatVec {
         }
         let raw = self.data as *mut u8;
         unsafe {
+            // SAFETY: addr now points in bounds (the call to grow guarantees that len < capacity)
             let addr = raw.add(TupleHeader::size_of_entry(self.arity) * self.len);
             let header = addr as *mut TupleHeader;
+            // SAFETY: TupleHeader has a trivial drop method, and the pointer is in-bounds
             header.write(TupleHeader {
                 write_ts: ts,
                 stale_ts: !0,
                 out,
             });
+            // SAFETY: We aways reserve entry_size() capacity, so if `addr` is in-bounds, then so is `dst`
             let dst = addr.add(mem::size_of::<TupleHeader>());
+            // SAFETY:
+            //  * ins has `arity` entries due to assertion at the top of the function
+            //  * `dst` has `arity` entries due to the calls to realloc always
+            //    ocurreing in multiples of entry_size()
+            //  * The two cannot overlap becase `dst` is currently uninitialized memory.
             ptr::copy_nonoverlapping(ins.as_ptr(), dst as *mut Value, self.arity);
         }
+        self.len += 1;
+    }
+
+    /// Get the contents of the tuple at this slot. Returns nothing if the value
+    /// was stale.
+    ///
+    /// # Panics
+    /// This method will panic if `i` is out of bounds.
+    fn get(&self, i: usize) -> Option<(&[Value], &Value, u32)> {
+        let hdr = self.header(i);
+        if hdr.stale_ts != u32::MAX {
+            return None;
+        }
+        let inputs = unsafe {
+            // SAFETY: we've checked that the header is in bounds, and we
+            // reserve a full entry_size() amount of space per slot.
+            let addr = (hdr as *const TupleHeader).add(1) as *const Value;
+            slice::from_raw_parts(addr, self.arity)
+        };
+        Some((inputs, &hdr.out, hdr.write_ts))
+    }
+
+    fn set_stale(&mut self, i: usize, ts: u32) {
+        self.header_mut(i).stale_ts = ts;
+    }
+
+    fn header_raw(&self, i: usize) -> *mut TupleHeader {
+        // SAFETY: this assertion guarantees that 'add' returns a valid address.
+        assert!(i < self.len);
+        unsafe { self.data.add(self.entry_size() * i) as *mut TupleHeader }
+    }
+
+    fn header(&self, i: usize) -> &TupleHeader {
+        // SAFETY: header_raw checks that `i` is in-bounds, and the entry will
+        // remain valid for the duration of the function.
+        unsafe { &*self.header_raw(i) }
+    }
+    fn header_mut(&mut self, i: usize) -> &mut TupleHeader {
+        // SAFETY: header_raw checks that `i` is in-bounds, and the entry will
+        // remain valid for the duration of the function.
+        unsafe { &mut *self.header_raw(i) }
     }
 
     fn grow(&mut self) {
-        todo!()
+        let next_capacity = if self.capacity == 0 {
+            1
+        } else {
+            self.capacity * 2
+        };
+        unsafe {
+            self.data = realloc(
+                self.data,
+                Layout::from_size_align(
+                    self.entry_size() * self.capacity,
+                    mem::align_of::<TupleHeader>(),
+                )
+                .unwrap(),
+                self.entry_size() * next_capacity,
+            )
+        }
+        self.capacity = next_capacity;
+    }
+
+    fn entry_size(&self) -> usize {
+        TupleHeader::size_of_entry(self.arity)
     }
 }
 
