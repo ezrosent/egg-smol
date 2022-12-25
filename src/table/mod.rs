@@ -41,6 +41,9 @@ use crate::{
     binary_search::binary_search_table_by_key, util::BuildHasher as BH, TupleOutput, Value,
 };
 
+#[cfg(test)]
+mod tests;
+
 type Offset = usize;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -307,6 +310,8 @@ impl TupleHeader {
     }
 }
 
+/// A vector type that stores a dynamically-specified number of values in each
+/// entry.
 struct FlatVec {
     arity: usize,
     len: usize,

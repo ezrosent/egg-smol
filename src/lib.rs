@@ -69,7 +69,7 @@ enum MergeFn {
     Expr(Rc<Program>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TupleOutput {
     value: Value,
     timestamp: u32,
