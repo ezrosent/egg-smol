@@ -671,7 +671,7 @@ impl EGraph {
             .nodes
             .iter()
             .take(n)
-            .map(|(k, v)| (ValueVec::from(k), v.clone()))
+            .map(|(k, v)| (ValueVec::from(k), *v))
             .collect::<Vec<_>>();
 
         let out_is_unit = f.schema.output.name() == self.unit_sym;

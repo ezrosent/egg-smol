@@ -39,7 +39,6 @@ use static_assertions::const_assert;
 
 use crate::{
     binary_search::binary_search_table_by_key, util::BuildHasher as BH, TupleOutput, Value,
-    ValueVec,
 };
 
 type Offset = usize;
@@ -50,6 +49,243 @@ struct TableOffset {
     // probing, and to avoid `values` lookups entirely during insertions.
     hash: u64,
     off: Offset,
+}
+
+#[derive(Clone)]
+pub(crate) struct Table {
+    max_ts: u32,
+    n_stale: usize,
+    table: RawTable<TableOffset>,
+    vals: FlatVec,
+}
+
+/// Used for the RawTable probe sequence.
+macro_rules! search_for {
+    ($slf:expr, $hash:expr, $inp:expr) => {
+        |to| {
+            // Test that hashes match.
+            if to.hash != $hash {
+                return false;
+            }
+            // If the hash matches, the value should not be stale, and the data
+            // should match.
+            if let Some((inp, _)) = $slf.vals.get(to.off as usize) {
+                inp == $inp
+            } else {
+                // stale
+                false
+            }
+        }
+    };
+}
+
+impl Table {
+    pub(crate) fn new(arity: usize) -> Table {
+        Table {
+            max_ts: 0,
+            n_stale: 0,
+            table: Default::default(),
+            vals: FlatVec::new(arity),
+        }
+    }
+    /// Clear the contents of the table.
+    pub(crate) fn clear(&mut self) {
+        self.max_ts = 0;
+        self.n_stale = 0;
+        self.table.clear();
+        self.vals.clear();
+    }
+
+    /// Indicates whether or not the table should be rehashed.
+    pub(crate) fn too_stale(&self) -> bool {
+        self.n_stale > (self.vals.len() / 2)
+    }
+
+    /// Rehashes the table, invalidating any offsets stored into the table.
+    pub(crate) fn rehash(&mut self) {
+        let mut dst = 0usize;
+        self.table.clear();
+        self.vals.retain_live(|inp| {
+            let hash = hash_values(inp);
+            self.table
+                .insert(hash, TableOffset { hash, off: dst }, |to| to.hash);
+            dst += 1;
+        });
+        self.n_stale = 0;
+    }
+
+    /// Get the entry in the table for the given values, if they are in the
+    /// table.
+    pub(crate) fn get(&self, inputs: &[Value]) -> Option<&TupleOutput> {
+        let hash = hash_values(inputs);
+        let TableOffset { off, .. } = self.table.get(hash, search_for!(self, hash, inputs))?;
+        self.vals.get_output(*off)
+    }
+
+    /// Insert the given data into the table at the given timestamp. Return the
+    /// previous value, if there was one.
+    pub(crate) fn insert(&mut self, inputs: &[Value], out: Value, ts: u32) -> Option<Value> {
+        let mut res = None;
+        self.insert_and_merge(inputs, ts, |prev| {
+            res = prev;
+            out
+        });
+        res
+    }
+
+    /// Insert the given data into the table at the given timestamp. Thismethod
+    /// allows for efficient 'merges', conditional on the previous value mapped
+    /// to by the given index.
+    ///
+    /// * `on_merge(None)` should return the value mapping to the given slot.
+    /// * `on_merge(Some(x))` can return a "merged" value (e.g. the union union
+    ///   of `x` and `on_merge(None)`).
+    pub(crate) fn insert_and_merge(
+        &mut self,
+        inputs: &[Value],
+        ts: u32,
+        on_merge: impl FnOnce(Option<Value>) -> Value,
+    ) {
+        assert!(ts >= self.max_ts);
+        self.max_ts = ts;
+        let hash = hash_values(inputs);
+        if let Some(TableOffset { off, .. }) =
+            self.table.get_mut(hash, search_for!(self, hash, inputs))
+        {
+            let hdr = self.vals.header_mut(*off);
+            debug_assert!(hdr.live());
+            let next = on_merge(Some(hdr.out.value));
+            if next.bits == hdr.out.value.bits {
+                return;
+            }
+            hdr.stale_ts = ts;
+            self.n_stale += 1;
+            let new_offset = self.vals.len();
+            self.vals.push(ts, inputs, next);
+            *off = new_offset;
+            return;
+        }
+        let new_offset = self.vals.len();
+        self.vals.push(ts, inputs, on_merge(None));
+        self.table.insert(
+            hash,
+            TableOffset {
+                hash,
+                off: new_offset,
+            },
+            |off| off.hash,
+        );
+    }
+
+    /// One more than the maximum (potentially) valid offset into the table.
+    pub(crate) fn len(&self) -> usize {
+        self.vals.len()
+    }
+
+    /// Whether the table is completely empty, including stale entries.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The minimum timestamp stored by the table, if there is one.
+    pub(crate) fn min_timestamp(&self) -> Option<u32> {
+        self.vals.min_timestamp()
+    }
+
+    /// An upper bound for all timestamps stored in the table.
+    pub(crate) fn max_ts(&self) -> u32 {
+        self.max_ts
+    }
+
+    /// Get the timestamp for the entry at index `i`.
+    pub(crate) fn get_timestamp(&self, i: usize) -> u32 {
+        self.vals.get_timestamp(i)
+    }
+
+    /// Remove the given mapping from the table, returns whether an entry was
+    /// removed.
+    pub(crate) fn remove(&mut self, inp: &[Value], ts: u32) -> bool {
+        let hash = hash_values(inp);
+        let entry = if let Some(entry) = self.table.remove_entry(hash, search_for!(self, hash, inp))
+        {
+            entry
+        } else {
+            return false;
+        };
+        self.n_stale += self.vals.set_stale(entry.off, ts) as usize;
+        true
+    }
+
+    /// Remove the entry at the given offset from the table.
+    pub(crate) fn remove_index(&mut self, i: usize, ts: u32) {
+        self.n_stale += self.vals.set_stale(i, ts) as usize;
+    }
+
+    /// Returns the entries at the given index if the entry is live and the index in bounds.
+    pub(crate) fn get_index(&self, i: usize) -> Option<(&[Value], &TupleOutput)> {
+        self.vals.get(i)
+    }
+
+    /// Iterate over the live entries in the table, in insertion order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&[Value], &TupleOutput)> + '_ {
+        self.iter_range(0..self.len()).map(|(_, y, z)| (y, z))
+    }
+
+    /// Iterate over the live entries in the offset range, passing back the
+    /// offset corresponding to each entry.
+    pub(crate) fn iter_range(
+        &self,
+        range: Range<usize>,
+    ) -> impl Iterator<Item = (usize, &[Value], &TupleOutput)> + '_ {
+        self.vals.iter_range(range)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn assert_sorted(&self) {
+        let ts = Vec::from_iter((0..self.vals.len()).map(|x| self.vals.get_timestamp(x)));
+        assert!(ts.windows(2).all(|xs| xs[0] <= xs[1]));
+    }
+
+    /// Iterate over the live entries in the timestamp range, passing back their
+    /// offset into the table.
+    pub(crate) fn iter_timestamp_range(
+        &self,
+        range: &Range<u32>,
+    ) -> impl Iterator<Item = (usize, &[Value], &TupleOutput)> + '_ {
+        let indexes = self.transform_range(range);
+        self.iter_range(indexes)
+    }
+
+    /// Return the approximate number of entries in the table for the given
+    /// timestamp range.
+    pub(crate) fn approximate_range_size(&self, range: &Range<u32>) -> usize {
+        let indexes = self.transform_range(range);
+        indexes.end - indexes.start
+    }
+
+    /// Transform a range of timestamps to the corresponding range of indexes
+    /// into the table.
+    pub(crate) fn transform_range(&self, range: &Range<u32>) -> Range<usize> {
+        if let Some(start) = binary_search_table_by_key(self, range.start) {
+            if let Some(end) = binary_search_table_by_key(self, range.end) {
+                start..end
+            } else {
+                start..self.len()
+            }
+        } else {
+            0..0
+        }
+    }
+}
+
+fn hash_values(vs: &[Value]) -> u64 {
+    // Just hash the bits: all inputs to the same function should have matching
+    // column types.
+    let mut hasher = BH::default().build_hasher();
+    for v in vs {
+        v.bits.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[derive(Copy, Clone)]
@@ -303,266 +539,5 @@ impl FlatVec {
 
     fn entry_size(&self) -> usize {
         TupleHeader::size_of_entry(self.arity)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Table {
-    max_ts: u32,
-    n_stale: usize,
-    table: RawTable<TableOffset>,
-    vals: FlatVec,
-}
-
-/// Used for the RawTable probe sequence.
-macro_rules! search_for {
-    ($slf:expr, $hash:expr, $inp:expr) => {
-        |to| {
-            // Test that hashes match.
-            if to.hash != $hash {
-                return false;
-            }
-            // If the hash matches, the value should not be stale, and the data
-            // should match.
-            if let Some((inp, _)) = $slf.vals.get(to.off as usize) {
-                inp == $inp
-            } else {
-                // stale
-                false
-            }
-        }
-    };
-}
-
-impl Table {
-    pub(crate) fn new(arity: usize) -> Table {
-        Table {
-            max_ts: 0,
-            n_stale: 0,
-            table: Default::default(),
-            vals: FlatVec::new(arity),
-        }
-    }
-    /// Clear the contents of the table.
-    pub(crate) fn clear(&mut self) {
-        self.max_ts = 0;
-        self.n_stale = 0;
-        self.table.clear();
-        self.vals.clear();
-    }
-
-    /// Indicates whether or not the table should be rehashed.
-    pub(crate) fn too_stale(&self) -> bool {
-        self.n_stale > (self.vals.len() / 2)
-    }
-
-    /// Rehashes the table, invalidating any offsets stored into the table.
-    pub(crate) fn rehash(&mut self) {
-        let mut dst = 0usize;
-        self.table.clear();
-        self.vals.retain_live(|inp| {
-            let hash = hash_values(inp);
-            self.table
-                .insert(hash, TableOffset { hash, off: dst }, |to| to.hash);
-            dst += 1;
-        });
-        self.n_stale = 0;
-    }
-
-    /// Get the entry in the table for the given values, if they are in the
-    /// table.
-    pub(crate) fn get(&self, inputs: &[Value]) -> Option<&TupleOutput> {
-        let hash = hash_values(inputs);
-        let TableOffset { off, .. } = self.table.get(hash, search_for!(self, hash, inputs))?;
-        self.vals.get_output(*off)
-    }
-
-    /// Insert the given data into the table at the given timestamp. Return the
-    /// previous value, if there was one.
-    pub(crate) fn insert(&mut self, inputs: &[Value], out: Value, ts: u32) -> Option<Value> {
-        let mut res = None;
-        self.insert_and_merge(inputs, ts, |prev| {
-            res = prev;
-            out
-        });
-        res
-    }
-
-    /// Insert the given data into the table at the given timestamp. Thismethod
-    /// allows for efficient 'merges', conditional on the previous value mapped
-    /// to by the given index.
-    ///
-    /// * `on_merge(None)` should return the value mapping to the given slot.
-    /// * `on_merge(Some(x))` can return a "merged" value (e.g. the union union
-    ///   of `x` and `on_merge(None)`).
-    pub(crate) fn insert_and_merge(
-        &mut self,
-        inputs: &[Value],
-        ts: u32,
-        on_merge: impl FnOnce(Option<Value>) -> Value,
-    ) {
-        assert!(ts >= self.max_ts);
-        self.max_ts = ts;
-        let hash = hash_values(inputs);
-        if let Some(TableOffset { off, .. }) =
-            self.table.get_mut(hash, search_for!(self, hash, inputs))
-        {
-            let hdr = self.vals.header_mut(*off);
-            debug_assert!(hdr.live());
-            let next = on_merge(Some(hdr.out.value));
-            if next.bits == hdr.out.value.bits {
-                return;
-            }
-            hdr.stale_ts = ts;
-            self.n_stale += 1;
-            let new_offset = self.vals.len();
-            self.vals.push(ts, inputs, next);
-            *off = new_offset;
-            return;
-        }
-        let new_offset = self.vals.len();
-        self.vals.push(ts, inputs, on_merge(None));
-        self.table.insert(
-            hash,
-            TableOffset {
-                hash,
-                off: new_offset,
-            },
-            |off| off.hash,
-        );
-    }
-
-    /// One more than the maximum (potentially) valid offset into the table.
-    pub(crate) fn len(&self) -> usize {
-        self.vals.len()
-    }
-
-    /// Whether the table is completely empty, including stale entries.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The minimum timestamp stored by the table, if there is one.
-    pub(crate) fn min_timestamp(&self) -> Option<u32> {
-        self.vals.min_timestamp()
-    }
-
-    /// An upper bound for all timestamps stored in the table.
-    pub(crate) fn max_ts(&self) -> u32 {
-        self.max_ts
-    }
-
-    /// Get the timestamp for the entry at index `i`.
-    pub(crate) fn get_timestamp(&self, i: usize) -> u32 {
-        self.vals.get_timestamp(i)
-    }
-
-    /// Remove the given mapping from the table, returns whether an entry was
-    /// removed.
-    pub(crate) fn remove(&mut self, inp: &[Value], ts: u32) -> bool {
-        let hash = hash_values(inp);
-        let entry = if let Some(entry) = self.table.remove_entry(hash, search_for!(self, hash, inp))
-        {
-            entry
-        } else {
-            return false;
-        };
-        self.n_stale += self.vals.set_stale(entry.off, ts) as usize;
-        true
-    }
-
-    /// Remove the entry at the given offset from the table.
-    pub(crate) fn remove_index(&mut self, i: usize, ts: u32) {
-        self.n_stale += self.vals.set_stale(i, ts) as usize;
-    }
-
-    /// Returns the entries at the given index if the entry is live and the index in bounds.
-    pub(crate) fn get_index(&self, i: usize) -> Option<(&[Value], &TupleOutput)> {
-        self.vals.get(i)
-    }
-
-    /// Iterate over the live entries in the table, in insertion order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&[Value], &TupleOutput)> + '_ {
-        self.iter_range(0..self.len()).map(|(_, y, z)| (y, z))
-    }
-
-    /// Iterate over the live entries in the offset range, passing back the
-    /// offset corresponding to each entry.
-    pub(crate) fn iter_range(
-        &self,
-        range: Range<usize>,
-    ) -> impl Iterator<Item = (usize, &[Value], &TupleOutput)> + '_ {
-        self.vals.iter_range(range)
-    }
-
-    #[cfg(debug_assertions)]
-    pub(crate) fn assert_sorted(&self) {
-        let ts = Vec::from_iter((0..self.vals.len()).map(|x| self.vals.get_timestamp(x)));
-        assert!(ts.windows(2).all(|xs| xs[0] <= xs[1]));
-    }
-
-    /// Iterate over the live entries in the timestamp range, passing back their
-    /// offset into the table.
-    pub(crate) fn iter_timestamp_range(
-        &self,
-        range: &Range<u32>,
-    ) -> impl Iterator<Item = (usize, &[Value], &TupleOutput)> + '_ {
-        let indexes = self.transform_range(range);
-        self.iter_range(indexes)
-    }
-
-    /// Return the approximate number of entries in the table for the given
-    /// timestamp range.
-    pub(crate) fn approximate_range_size(&self, range: &Range<u32>) -> usize {
-        let indexes = self.transform_range(range);
-        indexes.end - indexes.start
-    }
-
-    /// Transform a range of timestamps to the corresponding range of indexes
-    /// into the table.
-    pub(crate) fn transform_range(&self, range: &Range<u32>) -> Range<usize> {
-        if let Some(start) = binary_search_table_by_key(self, range.start) {
-            if let Some(end) = binary_search_table_by_key(self, range.end) {
-                start..end
-            } else {
-                start..self.len()
-            }
-        } else {
-            0..0
-        }
-    }
-}
-
-fn hash_values(vs: &[Value]) -> u64 {
-    // Just hash the bits: all inputs to the same function should have matching
-    // column types.
-    let mut hasher = BH::default().build_hasher();
-    for v in vs {
-        v.bits.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Input {
-    data: ValueVec,
-    /// The timestamp at which the given input became "stale"
-    stale_at: u32,
-}
-
-impl Input {
-    fn new(data: ValueVec) -> Input {
-        Input {
-            data,
-            stale_at: u32::MAX,
-        }
-    }
-
-    fn data(&self) -> &[Value] {
-        self.data.as_slice()
-    }
-
-    fn live(&self) -> bool {
-        self.stale_at == u32::MAX
     }
 }
