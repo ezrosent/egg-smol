@@ -15,7 +15,7 @@ fn insert_to_map(table: &mut Table, i: u32, ts: u32) {
 
 #[test]
 fn binary_search() {
-    let mut map = Table::default();
+    let mut map = Table::new(1);
     assert_eq!(binary_search_table_by_key(&map, 0), None);
     insert_to_map(&mut map, 1, 1);
     assert_eq!(binary_search_table_by_key(&map, 0), Some(0));

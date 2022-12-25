@@ -11,7 +11,7 @@ pub(crate) fn binary_search_table_by_key(data: &Table, target: u32) -> Option<us
     if data.max_ts() < target {
         return None;
     }
-    if data.min_ts().unwrap() > target {
+    if data.min_timestamp().unwrap() > target {
         return Some(0);
     }
     // adapted from std::slice::binary_search_by
@@ -20,7 +20,7 @@ pub(crate) fn binary_search_table_by_key(data: &Table, target: u32) -> Option<us
     let mut right = size;
     while left < right {
         let mut mid = left + size / 2;
-        let cmp = data.get_timestamp(mid).unwrap().cmp(&target);
+        let cmp = data.get_timestamp(mid).cmp(&target);
 
         // The std implementation claims that if/else generates better code than match.
         if cmp == Ordering::Less {
@@ -36,7 +36,7 @@ pub(crate) fn binary_search_table_by_key(data: &Table, target: u32) -> Option<us
             // https://github.com/frankmcsherry/blog/blob/master/posts/2018-05-19.md
             while mid > 0 {
                 let next_mid = mid - 1;
-                if data.get_timestamp(next_mid).unwrap() != target {
+                if data.get_timestamp(next_mid) != target {
                     break;
                 }
                 mid = next_mid;

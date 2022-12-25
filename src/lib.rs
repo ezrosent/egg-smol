@@ -69,7 +69,7 @@ enum MergeFn {
     Expr(Rc<Program>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct TupleOutput {
     value: Value,
     timestamp: u32,
@@ -577,6 +577,7 @@ impl EGraph {
                 None => return Err(Error::TypeError(TypeError::Unbound(*s))),
             })
         }
+        let arity = input.len();
 
         let output = match self.sorts.get(&decl.schema.output) {
             Some(sort) => sort.clone(),
@@ -613,7 +614,7 @@ impl EGraph {
         let function = Function {
             decl: decl.clone(),
             schema: ResolvedSchema { input, output },
-            nodes: Default::default(),
+            nodes: Table::new(arity),
             scratch: Default::default(),
             sorts,
             // TODO: build indexes for primitive sorts lazily
