@@ -635,6 +635,7 @@ impl EGraph {
         stack: &mut Vec<Value>,
         subst: &[Value],
         program: &Program,
+        rule: RuleId,
         make_defaults: bool,
     ) -> Result<(), Error> {
         for instr in &program.0 {
@@ -662,13 +663,18 @@ impl EGraph {
                         let out = &function.schema.output;
                         match function.decl.default.as_ref() {
                             None if out.name() == self.unit_sym => {
-                                function.insert(values, Value::unit(), ts);
+                                function.insert(
+                                    values,
+                                    Value::unit(),
+                                    ts,
+                                    RowJustification::Base(rule),
+                                );
                                 Value::unit()
                             }
                             None if out.is_eq_sort() => {
                                 let id = self.unionfind.make_set();
                                 let value = Value::from_id(out.name(), id);
-                                function.insert(values, value, ts);
+                                function.insert(values, value, ts, RowJustification::Base(rule));
                                 value
                             }
                             Some(_default) => {
@@ -708,7 +714,12 @@ impl EGraph {
                     let args = &stack[new_len..];
 
                     // We should only have canonical values here: omit the canonicalization step
-                    let old_value = function.insert(args, new_value, self.timestamp);
+                    let old_value = function.insert(
+                        args,
+                        new_value,
+                        self.timestamp,
+                        RowJustification::Base(rule),
+                    );
 
                     // if the value does not exist or the two values differ
                     if old_value.is_none() || old_value != Some(new_value) {
@@ -721,13 +732,22 @@ impl EGraph {
                             let tag = old_value.tag;
                             let merged: Value = match function.merge.clone() {
                                 MergeFn::AssertEq => panic!("No error for this yet"),
-                                MergeFn::Union => {
-                                    self.unionfind.union_values(old_value, new_value, tag)
-                                }
+                                MergeFn::Union => self.unionfind.union_values(
+                                    old_value,
+                                    new_value,
+                                    tag,
+                                    Justification::MergeTodo,
+                                ),
                                 MergeFn::Expr(merge_prog) => {
                                     let values = [old_value, new_value];
                                     let old_len = stack.len();
-                                    self.run_actions(stack, &values, &merge_prog, true)?;
+                                    self.run_actions(
+                                        stack,
+                                        &values,
+                                        &merge_prog,
+                                        RuleId::merge_logic(),
+                                        true,
+                                    )?;
                                     let result = stack.pop().unwrap();
                                     stack.truncate(old_len);
                                     result
@@ -736,7 +756,12 @@ impl EGraph {
                             // re-borrow
                             let args = &stack[new_len..];
                             let function = self.functions.get_mut(f).unwrap();
-                            function.insert(args, merged, self.timestamp);
+                            function.insert(
+                                args,
+                                merged,
+                                self.timestamp,
+                                RowJustification::Todo_xxx,
+                            );
                         }
                     }
                     stack.truncate(new_len)
@@ -751,7 +776,7 @@ impl EGraph {
                         if a != b {
                             self.saturated = false;
                         }
-                        self.unionfind.union(a, b, sort)
+                        self.unionfind.union(a, b, sort, Justification::Base(rule))
                     });
                     stack.truncate(new_len);
                 }

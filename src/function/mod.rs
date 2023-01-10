@@ -1,6 +1,11 @@
 use smallvec::SmallVec;
 
-use crate::*;
+use crate::{
+    proofs::{Justification, RowJustification},
+    *,
+};
+
+use self::table::InsertResult;
 
 mod binary_search;
 pub mod index;
@@ -34,6 +39,7 @@ pub enum MergeFn {
 pub struct TupleOutput {
     pub value: Value,
     pub timestamp: u32,
+    pub reason: RowJustification,
 }
 
 #[derive(Clone, Debug)]
@@ -99,8 +105,14 @@ impl Function {
         })
     }
 
-    pub fn insert(&mut self, inputs: &[Value], value: Value, timestamp: u32) -> Option<Value> {
-        self.insert_internal(inputs, value, timestamp, true)
+    pub fn insert(
+        &mut self,
+        inputs: &[Value],
+        value: Value,
+        timestamp: u32,
+        reason: RowJustification,
+    ) -> Option<Value> {
+        self.insert_internal(inputs, value, timestamp, reason, true)
     }
     pub fn clear(&mut self) {
         self.nodes.clear();
@@ -114,11 +126,12 @@ impl Function {
         inputs: &[Value],
         value: Value,
         timestamp: u32,
+        reason: RowJustification,
         // Clean out all stale entries if they account for a sufficiently large
         // portion of the table after this entry is inserted.
         maybe_rehash: bool,
     ) -> Option<Value> {
-        let res = self.nodes.insert(inputs, value, timestamp);
+        let res = self.nodes.insert(inputs, value, timestamp, reason);
         if maybe_rehash {
             self.maybe_rehash();
         }
@@ -233,16 +246,19 @@ impl Function {
         let mut out_val = out.value;
         scratch.clear();
         scratch.extend(args.iter().copied());
+        let start = scratch.len();
 
-        for (val, ty) in scratch.iter_mut().zip(&self.schema.input) {
+        for (i, ty) in (0..start).zip(&self.schema.input) {
+            let val = scratch[i];
             if !ty.is_eq_sort() {
+                scratch.push(val);
                 continue;
             }
-            let new = uf.find_value(*val);
+            let new = uf.find_value(val);
             if new.bits != val.bits {
-                *val = new;
                 modified = true;
             }
+            scratch.push(new);
         }
 
         if self.schema.output.is_eq_sort() {
@@ -257,18 +273,54 @@ impl Function {
             return;
         }
         self.nodes.remove_index(i, timestamp);
-        self.nodes.insert_and_merge(scratch, timestamp, |prev| {
-            if let Some(prev) = prev {
-                if !self.schema.output.is_eq_sort() {
-                    // TODO: call the merge fn
-                    prev
+        let new_offset = self
+            .nodes
+            .insert_and_merge(&scratch[start..], timestamp, |prev| {
+                if let Some((prev, reason)) = prev {
+                    if !self.schema.output.is_eq_sort() {
+                        // TODO: call the merge fn
+                        return prev;
+                    }
+                    let mut res = None;
+                    for (prev_arg, canon_arg) in
+                        scratch[0..start].iter().zip(scratch[start..].iter())
+                    {
+                        // Add a congruence edge for every re-canonicalized item.
+                        if prev_arg.bits != canon_arg.bits {
+                            res = Some(uf.union_values(
+                                prev,
+                                out_val,
+                                self.schema.output.name(),
+                                Justification::Cong(
+                                    Id::from(prev_arg.bits as usize),
+                                    Id::from(canon_arg.bits as usize),
+                                ),
+                            ));
+                        }
+                    }
+                    res.unwrap()
                 } else {
-                    uf.union_values(prev, out_val, self.schema.output.name())
+                    out_val
                 }
-            } else {
-                out_val
+            });
+        match new_offset {
+            InsertResult::Merged(merged) => {
+                let merged = self.nodes.save(merged);
+                let rebuilt = self.nodes.save(i);
+                self.nodes.set_reason(
+                    self.nodes.len() - 1,
+                    RowJustification::Merged { rebuilt, merged },
+                );
             }
-        });
+            InsertResult::Append => {
+                let prev = self.nodes.save(i);
+                self.nodes
+                    .set_reason(self.nodes.len() - 1, RowJustification::Rebuilt(prev));
+            }
+            InsertResult::NoChange => {
+                // Good to go!
+            }
+        }
     }
 
     pub(crate) fn get_size(&self, range: &Range<u32>) -> usize {

@@ -2,6 +2,7 @@ pub mod ast;
 mod extract;
 mod function;
 mod gj;
+mod proofs;
 pub mod sort;
 mod typecheck;
 mod unionfind;
@@ -11,6 +12,7 @@ mod value;
 use hashbrown::hash_map::Entry;
 use index::ColumnIndex;
 use instant::{Duration, Instant};
+use proofs::{Justification, RuleId};
 use sort::*;
 use thiserror::Error;
 
@@ -37,6 +39,7 @@ use gj::*;
 use unionfind::*;
 use util::*;
 
+use crate::proofs::RowJustification;
 use crate::typecheck::TypeError;
 
 pub type Subst = IndexMap<Symbol, Value>;
@@ -126,6 +129,7 @@ pub struct EGraph {
     saturated: bool,
     timestamp: u32,
     unit_sym: Symbol,
+    rule_counter: RuleId,
     pub match_limit: usize,
     pub node_limit: usize,
     pub fact_directory: Option<PathBuf>,
@@ -135,6 +139,7 @@ pub struct EGraph {
 #[derive(Clone, Debug)]
 struct Rule {
     query: CompiledQuery,
+    id: RuleId,
     program: Program,
     matches: usize,
     times_banned: usize,
@@ -155,6 +160,7 @@ impl Default for EGraph {
             rules: Default::default(),
             primitives: Default::default(),
             presorts: Default::default(),
+            rule_counter: Default::default(),
             unit_sym,
             match_limit: 10_000_000,
             node_limit: 100_000_000,
@@ -224,8 +230,8 @@ impl EGraph {
         self.primitives.entry(prim.name()).or_default().push(prim);
     }
 
-    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol) -> Id {
-        self.unionfind.union(id1, id2, sort)
+    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol, reason: Justification) -> Id {
+        self.unionfind.union(id1, id2, sort, reason)
     }
 
     #[track_caller]
@@ -268,7 +274,7 @@ impl EGraph {
                 assert!(exprs.len() > 1);
                 let values: Vec<(ArcSort, Value)> = exprs
                     .iter()
-                    .map(|e| self.eval_expr(e, None, false))
+                    .map(|e| self.eval_expr(e, None, RuleId::background(), false))
                     .collect::<Result<_, _>>()?;
 
                 let (_t0, v0) = &values[0];
@@ -295,7 +301,7 @@ impl EGraph {
                 Expr::Call(_, _) => {
                     // println!("Checking fact: {}", expr);
                     let unit = self.get_sort::<UnitSort>();
-                    self.eval_expr(expr, Some(unit), false)?;
+                    self.eval_expr(expr, Some(unit), RuleId::background(), false)?;
                 }
             },
         }
@@ -604,7 +610,7 @@ impl EGraph {
                 }
                 // we can ignore results here
                 stack.clear();
-                let _ = self.run_actions(stack, values, &rule.program, true);
+                let _ = self.run_actions(stack, values, &rule.program, rule.id, true);
             }
 
             rule.apply_time += rule_apply_start.elapsed();
@@ -628,6 +634,7 @@ impl EGraph {
         // );
         let compiled_rule = Rule {
             query,
+            id: self.rule_counter.next(),
             matches: 0,
             times_banned: 0,
             banned_until: 0,
@@ -668,13 +675,13 @@ impl EGraph {
         self.add_rule_with_name(name, rule)
     }
 
-    pub fn eval_actions(&mut self, actions: &[Action]) -> Result<(), Error> {
+    pub fn eval_actions(&mut self, actions: &[Action], rule: RuleId) -> Result<(), Error> {
         let types = Default::default();
         let program = self
             .compile_actions(&types, actions)
             .map_err(Error::TypeErrors)?;
         let mut stack = vec![];
-        self.run_actions(&mut stack, &[], &program, true)?;
+        self.run_actions(&mut stack, &[], &program, rule, true)?;
         Ok(())
     }
 
@@ -682,6 +689,7 @@ impl EGraph {
         &mut self,
         expr: &Expr,
         expected_type: Option<ArcSort>,
+        rule: RuleId,
         make_defaults: bool,
     ) -> Result<(ArcSort, Value), Error> {
         let types = Default::default();
@@ -689,7 +697,7 @@ impl EGraph {
             .compile_expr(&types, expr, expected_type)
             .map_err(Error::TypeErrors)?;
         let mut stack = vec![];
-        self.run_actions(&mut stack, &[], &program, make_defaults)?;
+        self.run_actions(&mut stack, &[], &program, rule, make_defaults)?;
         assert_eq!(stack.len(), 1);
         Ok((t, stack.pop().unwrap()))
     }
@@ -790,7 +798,7 @@ impl EGraph {
             }
             Command::Action(action) => {
                 if should_run {
-                    self.eval_actions(std::slice::from_ref(&action))?;
+                    self.eval_actions(std::slice::from_ref(&action), RuleId::bare_action())?;
                     format!("Run {action}.")
                 } else {
                     format!("Skipping running {action}.")
@@ -919,7 +927,7 @@ impl EGraph {
                         Action::Set(name, exprs, out)
                     });
                 }
-                self.eval_actions(&actions)?;
+                self.eval_actions(&actions, RuleId::background())?;
                 format!("Read {} facts into {name} from '{file}'.", actions.len())
             }
         })
@@ -950,8 +958,8 @@ impl EGraph {
             let b = &ab[1];
             self.push();
             *depth += 1;
-            self.eval_expr(a, None, true)?;
-            self.eval_expr(b, None, true)?;
+            self.eval_expr(a, None, RuleId::calc(), true)?;
+            self.eval_expr(b, None, RuleId::calc(), true)?;
             let cond = Fact::Eq(vec![a.clone(), b.clone()]);
             self.run_command(
                 Command::Run(RunConfig {
@@ -996,7 +1004,7 @@ impl EGraph {
         variants: usize,
     ) -> Result<(usize, Expr, Vec<Expr>), Error> {
         self.rebuild();
-        let (_t, value) = self.eval_expr(&e, None, true)?;
+        let (_t, value) = self.eval_expr(&e, None, RuleId::extract(), true)?;
         let (cost, expr) = self.extract(value);
         let exprs = if variants > 0 {
             self.extract_variants(value, variants)
@@ -1021,7 +1029,12 @@ impl EGraph {
         let f = self.functions.get_mut(&name).unwrap();
         let id = self.unionfind.make_set();
         let value = Value::from_id(sort.name(), id);
-        f.insert(&[], value, self.timestamp);
+        f.insert(
+            &[],
+            value,
+            self.timestamp,
+            RowJustification::Base(RuleId::background()),
+        );
         Ok(())
     }
     pub fn define(
@@ -1030,7 +1043,7 @@ impl EGraph {
         expr: Expr,
         cost: Option<usize>,
     ) -> Result<ArcSort, Error> {
-        let (sort, value) = self.eval_expr(&expr, None, true)?;
+        let (sort, value) = self.eval_expr(&expr, None, RuleId::background(), true)?;
         self.declare_function(&FunctionDecl {
             name,
             schema: Schema {
@@ -1042,7 +1055,12 @@ impl EGraph {
             cost,
         })?;
         let f = self.functions.get_mut(&name).unwrap();
-        f.insert(&[], value, self.timestamp);
+        f.insert(
+            &[],
+            value,
+            self.timestamp,
+            RowJustification::Base(RuleId::background()),
+        );
         Ok(sort)
     }
 

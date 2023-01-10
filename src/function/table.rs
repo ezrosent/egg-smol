@@ -34,7 +34,11 @@ use std::{
 use hashbrown::raw::RawTable;
 
 use super::binary_search::binary_search_table_by_key;
-use crate::{util::BuildHasher as BH, TupleOutput, Value, ValueVec};
+use crate::{
+    proofs::{RowJustification, RowOffset},
+    util::BuildHasher as BH,
+    TupleOutput, Value, ValueVec,
+};
 
 type Offset = usize;
 
@@ -52,6 +56,8 @@ pub(crate) struct Table {
     n_stale: usize,
     table: RawTable<TableOffset>,
     vals: Vec<(Input, TupleOutput)>,
+    // Old values kept around for provenance
+    old: Vec<(Input, TupleOutput)>,
 }
 
 /// Used for the RawTable probe sequence.
@@ -114,15 +120,35 @@ impl Table {
         Some(&self.vals[*off as usize].1)
     }
 
+    /// Get a stable row offset for the current tuple at offset `i`.
+    pub(crate) fn save(&mut self, i: usize) -> RowOffset {
+        let (ins, out) = &self.vals[i];
+        match out.reason {
+            RowJustification::Base(..) | RowJustification::Merged { .. } => {
+                let off = RowOffset::new(self.old.len());
+                self.old.push((ins.clone(), out.clone()));
+                off
+            }
+            RowJustification::Rebuilt(from) => from,
+            RowJustification::Todo_xxx => todo!(),
+        }
+    }
+
     /// Insert the given data into the table at the given timestamp. Return the
     /// previous value, if there was one.
-    pub(crate) fn insert(&mut self, inputs: &[Value], out: Value, ts: u32) -> Option<Value> {
+    pub(crate) fn insert(
+        &mut self,
+        inputs: &[Value],
+        out: Value,
+        ts: u32,
+        reason: RowJustification,
+    ) -> Option<Value> {
         let mut res = None;
         self.insert_and_merge(inputs, ts, |prev| {
             res = prev;
             out
         });
-        res
+        res.map(|(x, _)| x)
     }
 
     /// Insert the given data into the table at the given timestamp. Thismethod
@@ -136,8 +162,8 @@ impl Table {
         &mut self,
         inputs: &[Value],
         ts: u32,
-        on_merge: impl FnOnce(Option<Value>) -> Value,
-    ) {
+        on_merge: impl FnOnce(Option<(Value, RowJustification)>) -> Value,
+    ) -> InsertResult {
         assert!(ts >= self.max_ts);
         self.max_ts = ts;
         let hash = hash_values(inputs);
@@ -145,9 +171,9 @@ impl Table {
             self.table.get_mut(hash, search_for!(self, hash, inputs))
         {
             let (inp, prev) = &mut self.vals[*off as usize];
-            let next = on_merge(Some(prev.value));
+            let next = on_merge(Some((prev.value, prev.reason.clone())));
             if next == prev.value {
-                return;
+                return InsertResult::NoChange;
             }
             inp.stale_at = ts;
             self.n_stale += 1;
@@ -158,10 +184,12 @@ impl Table {
                 TupleOutput {
                     value: next,
                     timestamp: ts,
+                    reason: RowJustification::Todo_xxx,
                 },
             ));
+            let res = *off;
             *off = new_offset;
-            return;
+            return InsertResult::Merged(res);
         }
         let new_offset = self.vals.len();
         self.vals.push((
@@ -169,6 +197,7 @@ impl Table {
             TupleOutput {
                 value: on_merge(None),
                 timestamp: ts,
+                reason: RowJustification::Todo_xxx,
             },
         ));
         self.table.insert(
@@ -179,6 +208,11 @@ impl Table {
             },
             |off| off.hash,
         );
+        InsertResult::Append
+    }
+
+    pub(crate) fn set_reason(&mut self, i: usize, j: RowJustification) {
+        self.vals[i].1.reason = j;
     }
 
     /// One more than the maximum (potentially) valid offset into the table.
@@ -334,4 +368,15 @@ impl Input {
     fn live(&self) -> bool {
         self.stale_at == u32::MAX
     }
+}
+
+pub(crate) enum InsertResult {
+    /// The keys were present in the map previously at the given offset; a new,
+    /// merged, value was inserted at the end of the table.
+    Merged(usize),
+    /// The keys were not present in the map previously; the new tuple is at the
+    /// end of the table.
+    Append,
+    /// Attempt to insert a tuple into the table that was already present.
+    NoChange,
 }

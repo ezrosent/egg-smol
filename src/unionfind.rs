@@ -2,6 +2,7 @@
 //! halving for compression.
 //!
 //! This implementation uses interior mutability for `find`.
+use crate::proofs::{EqProofState, Justification, RuleId};
 use crate::util::HashMap;
 use crate::{Id, Symbol, Value};
 
@@ -16,6 +17,7 @@ pub struct UnionFind {
     n_unions: usize,
     recent_ids: HashMap<Symbol, Vec<Id>>,
     staged_ids: HashMap<Symbol, Vec<Id>>,
+    proofs: EqProofState,
 }
 
 impl UnionFind {
@@ -29,6 +31,7 @@ impl UnionFind {
     pub fn make_set(&mut self) -> Id {
         let res = Id::from(self.parents.len());
         self.parents.push(Cell::new(res));
+        self.proofs.make_set(res);
         res
     }
 
@@ -97,11 +100,17 @@ impl UnionFind {
     ///
     /// This method assumes that the given values belong to the same, "eq-able",
     /// sort. Its behavior is unspecified on other values.
-    pub fn union_values(&mut self, val1: Value, val2: Value, sort: Symbol) -> Value {
+    pub fn union_values(
+        &mut self,
+        val1: Value,
+        val2: Value,
+        sort: Symbol,
+        reason: Justification,
+    ) -> Value {
         debug_assert_eq!(val1.tag, val2.tag);
         let id1 = Id::from(val1.bits as usize);
         let id2 = Id::from(val2.bits as usize);
-        let res = self.union(id1, id2, sort);
+        let res = self.union(id1, id2, sort, reason);
         Value {
             bits: usize::from(res) as u64,
             tag: val1.tag,
@@ -111,8 +120,9 @@ impl UnionFind {
     /// Like [`union_values`], but operating on raw [`Id`]s.
     ///
     /// [`union_values`]: UnionFind::union_values
-    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol) -> Id {
+    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol, reason: Justification) -> Id {
         let (res, reparented) = self.do_union(id1, id2);
+        self.proofs.add_reason(id1, id2, reason);
         if let Some(id) = reparented {
             self.staged_ids.entry(sort).or_default().push(id)
         }

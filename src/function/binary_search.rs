@@ -51,7 +51,10 @@ pub(crate) fn binary_search_table_by_key(data: &Table, target: u32) -> Option<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Value;
+    use crate::{
+        proofs::{RowJustification, RuleId},
+        Value,
+    };
 
     fn make_value(bits: u32) -> Value {
         Value {
@@ -62,7 +65,7 @@ mod tests {
 
     fn insert_to_map(table: &mut Table, i: u32, ts: u32) {
         let v = make_value(i);
-        table.insert(&[v], v, ts);
+        table.insert(&[v], v, ts, RowJustification::Base(RuleId::background()));
     }
 
     #[test]
