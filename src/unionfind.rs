@@ -2,7 +2,7 @@
 //! halving for compression.
 //!
 //! This implementation uses interior mutability for `find`.
-use crate::proofs::{EqProofState, Justification, RuleId};
+use crate::proofs::{EqJustification, EqProofState};
 use crate::util::HashMap;
 use crate::{Id, Symbol, Value};
 
@@ -105,7 +105,7 @@ impl UnionFind {
         val1: Value,
         val2: Value,
         sort: Symbol,
-        reason: Justification,
+        reason: EqJustification,
     ) -> Value {
         debug_assert_eq!(val1.tag, val2.tag);
         let id1 = Id::from(val1.bits as usize);
@@ -120,7 +120,7 @@ impl UnionFind {
     /// Like [`union_values`], but operating on raw [`Id`]s.
     ///
     /// [`union_values`]: UnionFind::union_values
-    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol, reason: Justification) -> Id {
+    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol, reason: EqJustification) -> Id {
         let (res, reparented) = self.do_union(id1, id2);
         self.proofs.add_reason(id1, id2, reason);
         if let Some(id) = reparented {

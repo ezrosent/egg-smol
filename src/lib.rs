@@ -12,7 +12,7 @@ mod value;
 use hashbrown::hash_map::Entry;
 use index::ColumnIndex;
 use instant::{Duration, Instant};
-use proofs::{Justification, RuleId};
+use proofs::{EqJustification, RuleId};
 use sort::*;
 use thiserror::Error;
 
@@ -230,7 +230,7 @@ impl EGraph {
         self.primitives.entry(prim.name()).or_default().push(prim);
     }
 
-    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol, reason: Justification) -> Id {
+    pub fn union(&mut self, id1: Id, id2: Id, sort: Symbol, reason: EqJustification) -> Id {
         self.unionfind.union(id1, id2, sort, reason)
     }
 

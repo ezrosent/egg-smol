@@ -1,10 +1,11 @@
 use petgraph::prelude::{NodeIndex, UnGraph};
+use symbol_table::GlobalSymbol;
 
 use crate::Id;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EqProofState {
-    graph: UnGraph<Id, Justification>,
+    graph: UnGraph<Id, EqJustification>,
 }
 
 impl EqProofState {
@@ -12,7 +13,7 @@ impl EqProofState {
         debug_assert_eq!(usize::from(id), self.graph.node_count());
         self.graph.add_node(id);
     }
-    pub(crate) fn add_reason(&mut self, x: Id, y: Id, reason: Justification) {
+    pub(crate) fn add_reason(&mut self, x: Id, y: Id, reason: EqJustification) {
         self.graph.add_edge(Self::node(x), Self::node(y), reason);
     }
 
@@ -59,15 +60,17 @@ impl RuleId {
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct RowPtr {
+    pub(crate) func: GlobalSymbol,
+    pub(crate) off: RowOffset,
+}
+
 #[derive(Debug, Clone)]
-pub enum Justification {
-    // Not sure how to handle these just yet. This is used as a placeholder in the code
-    // Seems like we'd need something like:
-    // Merge(RowPtr, RowPtr)
-    // Where RowPtr := (Function, stable index into a row)
-    // Requires that we have two "stable" pointers for both old and new.
-    MergeTodo,
+pub enum EqJustification {
+    Merge(RowPtr, RowPtr),
     Base(RuleId),
+    // Seems like we need Vec<(Id, Id)> here, but the paper claims we do not need this!
     Cong(Id, Id),
 }
 
@@ -94,8 +97,6 @@ pub enum RowJustification {
         rebuilt: RowOffset,
         merged: RowOffset,
     },
-    // Remove this
-    Todo_xxx,
 }
 
 // What information do we store in a function output?

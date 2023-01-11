@@ -35,7 +35,7 @@ use hashbrown::raw::RawTable;
 
 use super::binary_search::binary_search_table_by_key;
 use crate::{
-    proofs::{RowJustification, RowOffset},
+    proofs::{RowJustification, RowOffset, RuleId},
     util::BuildHasher as BH,
     TupleOutput, Value, ValueVec,
 };
@@ -130,7 +130,6 @@ impl Table {
                 off
             }
             RowJustification::Rebuilt(from) => from,
-            RowJustification::Todo_xxx => todo!(),
         }
     }
 
@@ -142,13 +141,20 @@ impl Table {
         out: Value,
         ts: u32,
         reason: RowJustification,
-    ) -> Option<Value> {
+    ) -> Option<(Value, InsertResult)> {
         let mut res = None;
-        self.insert_and_merge(inputs, ts, |prev| {
+        let result = self.insert_and_merge(inputs, ts, |prev| {
             res = prev;
             out
         });
-        res.map(|(x, _)| x)
+        match &result {
+            InsertResult::Merged(..) | InsertResult::Append => {
+                self.vals.last_mut().unwrap().1.reason = reason;
+            }
+            // Just keep the initial justification for now.
+            InsertResult::NoChange(_) => {}
+        };
+        res.map(|x| (x, result))
     }
 
     /// Insert the given data into the table at the given timestamp. Thismethod
@@ -162,7 +168,7 @@ impl Table {
         &mut self,
         inputs: &[Value],
         ts: u32,
-        on_merge: impl FnOnce(Option<(Value, RowJustification)>) -> Value,
+        on_merge: impl FnOnce(Option<Value>) -> Value,
     ) -> InsertResult {
         assert!(ts >= self.max_ts);
         self.max_ts = ts;
@@ -171,9 +177,9 @@ impl Table {
             self.table.get_mut(hash, search_for!(self, hash, inputs))
         {
             let (inp, prev) = &mut self.vals[*off as usize];
-            let next = on_merge(Some((prev.value, prev.reason.clone())));
+            let next = on_merge(Some(prev.value));
             if next == prev.value {
-                return InsertResult::NoChange;
+                return InsertResult::NoChange(*off);
             }
             inp.stale_at = ts;
             self.n_stale += 1;
@@ -184,7 +190,7 @@ impl Table {
                 TupleOutput {
                     value: next,
                     timestamp: ts,
-                    reason: RowJustification::Todo_xxx,
+                    reason: RowJustification::Base(RuleId::background()),
                 },
             ));
             let res = *off;
@@ -197,7 +203,7 @@ impl Table {
             TupleOutput {
                 value: on_merge(None),
                 timestamp: ts,
-                reason: RowJustification::Todo_xxx,
+                reason: RowJustification::Base(RuleId::background()),
             },
         ));
         self.table.insert(
@@ -296,6 +302,40 @@ impl Table {
             })
     }
 
+    pub(crate) fn dump_offset(&self, off: RowOffset, prec: usize) {
+        let (vals, out) = &self.old[off.index()];
+        self.dump_inner(vals, out, prec)
+    }
+
+    fn dump_inner(&self, vals: &Input, out: &TupleOutput, prec: usize) {
+        for _ in 0..prec {
+            eprint!("\t");
+        }
+        eprint!("{:?}=>{:?} ", vals.data(), out.value);
+        match &out.reason {
+            RowJustification::Base(rule) => {
+                eprintln!("[{rule:?}]");
+            }
+            RowJustification::Rebuilt(off) => {
+                eprintln!("[rebuilt]");
+                self.dump_offset(*off, prec + 1);
+            }
+            RowJustification::Merged { rebuilt, merged } => {
+                eprintln!("[merged]");
+                for _ in 0..(prec + 1) {
+                    eprint!("\t");
+                }
+                eprintln!("left");
+                self.dump_offset(*rebuilt, prec + 2);
+                for _ in 0..(prec + 1) {
+                    eprint!("\t");
+                }
+                eprintln!("right");
+                self.dump_offset(*merged, prec + 2);
+            }
+        }
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn assert_sorted(&self) {
         assert!(self
@@ -370,7 +410,7 @@ impl Input {
     }
 }
 
-pub(crate) enum InsertResult {
+pub enum InsertResult {
     /// The keys were present in the map previously at the given offset; a new,
     /// merged, value was inserted at the end of the table.
     Merged(usize),
@@ -378,5 +418,5 @@ pub(crate) enum InsertResult {
     /// end of the table.
     Append,
     /// Attempt to insert a tuple into the table that was already present.
-    NoChange,
+    NoChange(usize),
 }

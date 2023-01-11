@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{proofs::RowPtr, *};
 use indexmap::map::Entry as IEntry;
 
 use thiserror::Error;
@@ -714,6 +714,8 @@ impl EGraph {
                     let args = &stack[new_len..];
 
                     // We should only have canonical values here: omit the canonicalization step
+
+                    // TODO: need to pass Option<(Value, usize)> back out.
                     let old_value = function.insert(
                         args,
                         new_value,
@@ -722,22 +724,46 @@ impl EGraph {
                     );
 
                     // if the value does not exist or the two values differ
-                    if old_value.is_none() || old_value != Some(new_value) {
+                    if old_value.is_none() || old_value.as_ref().map(|x| x.0) != Some(new_value) {
                         self.saturated = false;
                     }
 
-                    if let Some(old_value) = old_value {
+                    if let Some((old_value, res)) = old_value {
                         if new_value != old_value {
                             self.saturated = false;
                             let tag = old_value.tag;
+                            let (reason, eq) = match res {
+                                // We have compared them and they _aren't_ equal!
+                                InsertResult::NoChange(_) => unreachable!(),
+                                // We had a previous value in the table for this key,.
+                                InsertResult::Append => unreachable!(),
+                                InsertResult::Merged(prev) => {
+                                    // previous offset is at `prev`, current
+                                    // tuple will land at the end. First, we
+                                    // have to save it.
+                                    let prev_off = function.nodes.save(prev);
+                                    let cur_off = function.nodes.save(function.nodes.len() - 1);
+                                    let func = function.decl.name;
+                                    (
+                                        RowJustification::Merged {
+                                            rebuilt: prev_off,
+                                            merged: cur_off,
+                                        },
+                                        EqJustification::Merge(
+                                            RowPtr {
+                                                func,
+                                                off: prev_off,
+                                            },
+                                            RowPtr { func, off: cur_off },
+                                        ),
+                                    )
+                                }
+                            };
                             let merged: Value = match function.merge.clone() {
                                 MergeFn::AssertEq => panic!("No error for this yet"),
-                                MergeFn::Union => self.unionfind.union_values(
-                                    old_value,
-                                    new_value,
-                                    tag,
-                                    Justification::MergeTodo,
-                                ),
+                                MergeFn::Union => {
+                                    self.unionfind.union_values(old_value, new_value, tag, eq)
+                                }
                                 MergeFn::Expr(merge_prog) => {
                                     let values = [old_value, new_value];
                                     let old_len = stack.len();
@@ -756,12 +782,7 @@ impl EGraph {
                             // re-borrow
                             let args = &stack[new_len..];
                             let function = self.functions.get_mut(f).unwrap();
-                            function.insert(
-                                args,
-                                merged,
-                                self.timestamp,
-                                RowJustification::Todo_xxx,
-                            );
+                            function.insert(args, merged, self.timestamp, reason);
                         }
                     }
                     stack.truncate(new_len)
@@ -776,7 +797,8 @@ impl EGraph {
                         if a != b {
                             self.saturated = false;
                         }
-                        self.unionfind.union(a, b, sort, Justification::Base(rule))
+                        self.unionfind
+                            .union(a, b, sort, EqJustification::Base(rule))
                     });
                     stack.truncate(new_len);
                 }

@@ -1,11 +1,11 @@
 use smallvec::SmallVec;
 
 use crate::{
-    proofs::{Justification, RowJustification},
+    proofs::{EqJustification, RowJustification, RowOffset},
     *,
 };
 
-use self::table::InsertResult;
+pub(crate) use self::table::InsertResult;
 
 mod binary_search;
 pub mod index;
@@ -111,7 +111,7 @@ impl Function {
         value: Value,
         timestamp: u32,
         reason: RowJustification,
-    ) -> Option<Value> {
+    ) -> Option<(Value, InsertResult)> {
         self.insert_internal(inputs, value, timestamp, reason, true)
     }
     pub fn clear(&mut self) {
@@ -130,7 +130,7 @@ impl Function {
         // Clean out all stale entries if they account for a sufficiently large
         // portion of the table after this entry is inserted.
         maybe_rehash: bool,
-    ) -> Option<Value> {
+    ) -> Option<(Value, InsertResult)> {
         let res = self.nodes.insert(inputs, value, timestamp, reason);
         if maybe_rehash {
             self.maybe_rehash();
@@ -157,6 +157,11 @@ impl Function {
         }
         let target = &self.indexes[col];
         Some(target.clone())
+    }
+
+    #[allow(unused)]
+    pub fn print_offset(&self, off: RowOffset) {
+        self.nodes.dump_offset(off, 0)
     }
 
     pub(crate) fn remove(&mut self, ks: &[Value], ts: u32) -> bool {
@@ -276,7 +281,7 @@ impl Function {
         let new_offset = self
             .nodes
             .insert_and_merge(&scratch[start..], timestamp, |prev| {
-                if let Some((prev, reason)) = prev {
+                if let Some(prev) = prev {
                     if !self.schema.output.is_eq_sort() {
                         // TODO: call the merge fn
                         return prev;
@@ -291,7 +296,7 @@ impl Function {
                                 prev,
                                 out_val,
                                 self.schema.output.name(),
-                                Justification::Cong(
+                                EqJustification::Cong(
                                     Id::from(prev_arg.bits as usize),
                                     Id::from(canon_arg.bits as usize),
                                 ),
@@ -317,7 +322,7 @@ impl Function {
                 self.nodes
                     .set_reason(self.nodes.len() - 1, RowJustification::Rebuilt(prev));
             }
-            InsertResult::NoChange => {
+            InsertResult::NoChange(_) => {
                 // Good to go!
             }
         }
