@@ -190,7 +190,7 @@ impl Function {
         self.index_updated_through = self.index_updated_through.max(through);
     }
 
-    fn maybe_rehash(&mut self) {
+    pub(crate) fn maybe_rehash(&mut self) {
         if !self.nodes.too_stale() {
             return;
         }

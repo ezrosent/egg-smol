@@ -716,11 +716,12 @@ impl EGraph {
                     // We should only have canonical values here: omit the canonicalization step
 
                     // TODO: need to pass Option<(Value, usize)> back out.
-                    let old_value = function.insert(
+                    let old_value = function.insert_internal(
                         args,
                         new_value,
                         self.timestamp,
                         RowJustification::Base(rule),
+                        false,
                     );
 
                     // if the value does not exist or the two values differ
@@ -784,6 +785,8 @@ impl EGraph {
                             let function = self.functions.get_mut(f).unwrap();
                             function.insert(args, merged, self.timestamp, reason);
                         }
+                        // HACK
+                        self.functions.get_mut(f).unwrap().maybe_rehash();
                     }
                     stack.truncate(new_len)
                 }
