@@ -34,7 +34,7 @@ Intuitively, an associative and commutative operation like addition can be repre
 
 ## Implementation Sketch
 
-The high-level proposal is to introduce a new function $F^*$ for each `:assoc_comm` function $F$. $F$ must be a binary function with the same sort for its output and all inputs. $F^*$ will map a multiset of elements of this sort to the output. We'll use `Add` and `Add*` to follow the running example. Intuitively, nodes like:
+The high-level proposal is to introduce a new function $F^{*}$ for each `:assoc_comm` function $F$. $F$ must be a binary function with the same sort for its output and all inputs. $F^{*}$ will map a multiset of elements of this sort to the output. We'll use `Add` and `Add*` to follow the running example. Intuitively, nodes like:
 
 ```
     (Add a (Add b c))
