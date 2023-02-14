@@ -4,7 +4,7 @@ name = "egg-smol"
 version = "0.1.0"
 
 [workspace]
-members = [".", "web-demo"]
+members = [".", "web-demo", "val-trie"]
 
 [features]
 default = ["bin"]
