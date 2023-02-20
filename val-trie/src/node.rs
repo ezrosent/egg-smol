@@ -3,7 +3,7 @@
 use std::{
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
-    mem::{self},
+    mem,
     rc::Rc,
 };
 
@@ -124,8 +124,13 @@ impl<T> Default for Child<T> {
     }
 }
 
-// TODO: double the size of the bitset, store discriminants in there. manage the
-// memory ourselves.
+// TODO:
+// * double the size of the bitset, store discriminants in there.
+// * prefix compression may be more trouble than its worth, let's keep lazy
+// expansion but nix prefixes for now. Build new node representation before
+// killing the prefixes so we can track the lookup degradation.
+// * I suspect inserts are going to be so much slower though that it doesn't
+// matter.
 
 #[derive(Clone, Debug)]
 pub(crate) struct Node<T> {

@@ -89,19 +89,63 @@ fn lookup_test_random<M: MapLike>(c: &mut Criterion) {
     }
 }
 
+fn comparison<M: MapLike>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("Comparisons ({})", M::NAME));
+    let mut rng = rand::thread_rng();
+    for map_size in [1u64 << 10, 1 << 17] {
+        // Generate `map_size` unique integers
+        let mut set: HashSet<u64> = HashSet::with_capacity(map_size as usize);
+        while set.len() < map_size as usize {
+            set.insert(rng.gen());
+        }
+        let mut extra = rng.gen();
+        while set.contains(&extra) {
+            extra = rng.gen();
+        }
+        let mut map1 = M::default();
+        let mut map2 = M::default();
+        for i in &set {
+            map1.add(*i, *i);
+            map2.add(*i, *i);
+        }
+        let mut map3 = map1.clone();
+        map3.remove(*set.iter().next().unwrap());
+        map3.add(extra, extra);
+
+        let mut map4 = map1.clone();
+        map4.add(extra, extra);
+        map4.remove(extra);
+
+        group.bench_function(format!("equal, no sharing, size={map_size}"), |b| {
+            b.iter(|| black_box(map1 == map2))
+        });
+        group.bench_function(format!("equal, sharing, size={map_size}"), |b| {
+            b.iter(|| black_box(map1 == map4))
+        });
+        group.bench_function(format!("unequal, sharing, size={map_size}"), |b| {
+            b.iter(|| black_box(map1 == map3))
+        });
+        group.bench_function(format!("unequal, no sharing, size={map_size}"), |b| {
+            b.iter(|| black_box(map2 == map3))
+        });
+    }
+}
+
 // Benchmarks:
-// * sparse lookups
-// * test hashmap (where the map in question is a key) lookups (no sharing, some sharing)
 // * test insertions (similar to lookups: dense and sparse)
 
 trait MapLike: Clone + Eq + Default {
     const NAME: &'static str;
     fn add(&mut self, k: u64, v: u64);
     fn lookup(&self, k: u64) -> bool;
+    fn remove(&mut self, k: u64);
 }
 
 criterion_group!(
     benches,
+    comparison::<HashBrown>,
+    comparison::<ImMap>,
+    comparison::<ValTrie>,
     lookup_test_dense::<HashBrown>,
     lookup_test_dense::<ImMap>,
     lookup_test_dense::<ValTrie>,
@@ -125,6 +169,9 @@ impl MapLike for ValTrie {
     fn lookup(&self, k: u64) -> bool {
         self.contains_key(k)
     }
+    fn remove(&mut self, k: u64) {
+        self.remove(k);
+    }
 }
 
 impl MapLike for HashBrown {
@@ -136,6 +183,9 @@ impl MapLike for HashBrown {
     fn lookup(&self, k: u64) -> bool {
         self.contains_key(&k)
     }
+    fn remove(&mut self, k: u64) {
+        self.remove(&k);
+    }
 }
 
 impl MapLike for ImMap {
@@ -146,5 +196,8 @@ impl MapLike for ImMap {
 
     fn lookup(&self, k: u64) -> bool {
         self.contains_key(&k)
+    }
+    fn remove(&mut self, k: u64) {
+        self.remove(&k);
     }
 }
