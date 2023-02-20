@@ -325,7 +325,8 @@ impl<T: Item + Clone> Node<T> {
         key: u64,
         mut bits: usize,
         build_hasher: &impl BuildHasher,
-        on_merge: &mut impl FnMut(Option<&T>) -> T,
+        // TODO: make this FnOnce(Option<T>) -> T
+        on_merge: impl FnOnce(Option<&T>) -> T,
     ) {
         let cur = key << bits;
         let matching = matching_prefix(self.prefix(), cur);

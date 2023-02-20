@@ -60,7 +60,7 @@ impl<State: BuildHasher> IntSet<State> {
         let res = match &mut self.data {
             Child::Inner(n) => {
                 let mut inserted = true;
-                n.insert(k.key(), 0, &self.state, &mut |prev| {
+                n.insert(k.key(), 0, &self.state, |prev| {
                     inserted = prev.is_none();
                     k
                 });
