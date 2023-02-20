@@ -21,13 +21,11 @@ trait Radix {
 }
 
 struct Radix5;
-
 impl Radix for Radix5 {
     const BITS: usize = 5;
 }
 
 struct Radix4;
-
 impl Radix for Radix4 {
     const BITS: usize = 4;
 }
@@ -130,6 +128,9 @@ impl<T> Default for Child<T> {
         Child::Null
     }
 }
+
+// TODO: double the size of the bitset, store discriminants in there. manage the
+// memory ourselves.
 
 #[derive(Clone, Debug)]
 pub(crate) struct Node<T> {
@@ -314,7 +315,21 @@ impl<T: Item + Clone> Node<T> {
         }
         bits += self.prefix_len();
         match &self.children[next_node(key, bits)] {
-            Child::Inner(node) => node.lookup(key, bits + R::BITS),
+            Child::Inner(node) => node.lookup_internal(key, bits + R::BITS),
+            Child::Leaf(elt) => Some(elt),
+            Child::Null => None,
+        }
+    }
+
+    fn lookup_internal(&self, key: u64, mut bits: usize) -> Option<&T> {
+        debug_assert!(
+            bits + self.prefix_len() < 64,
+            "bits={bits}, prefix_len={}",
+            self.prefix_len()
+        );
+        bits += self.prefix_len();
+        match &self.children[next_node(key, bits)] {
+            Child::Inner(node) => node.lookup_internal(key, bits + R::BITS),
             Child::Leaf(elt) => Some(elt),
             Child::Null => None,
         }
@@ -398,8 +413,11 @@ impl<T: Item + Clone> Node<T> {
     }
 }
 
+#[inline(always)]
 fn next_node(key: u64, bits: usize) -> usize {
-    (((key << bits) >> (64 - R::BITS)) % (R::ARITY as u64)) as usize
+    const OFFSET: usize = 64 - R::BITS;
+    // ((key >> (OFFSET.saturating_sub(bits))) % (R::ARITY as u64)) as usize
+    (((key << bits) >> OFFSET) % (R::ARITY as u64)) as usize
 }
 
 pub(crate) trait Item {

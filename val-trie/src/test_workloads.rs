@@ -24,6 +24,7 @@ pub(crate) fn test_map(ops: impl IntoIterator<Item = Operation>) {
             Operation::Insert(i) => {
                 let k = i;
                 let v = i + 1;
+                assert_eq!(oracle.get(&k), map1.get(k));
                 assert_eq!(oracle.insert(k, v), map1.insert(k, v));
                 map2.insert(k, v);
                 assert_eq!(map1, map2);
@@ -32,6 +33,7 @@ pub(crate) fn test_map(ops: impl IntoIterator<Item = Operation>) {
                 assert_eq!(oracle.len(), map1.len());
             }
             Operation::Remove(i) => {
+                assert_eq!(oracle.contains_key(&i), map1.contains_key(i));
                 assert_eq!(oracle.remove(&i), map1.remove(i));
                 map2.remove(i);
                 assert_eq!(map1, map2);
@@ -60,6 +62,7 @@ pub(crate) fn test_set(ops: impl IntoIterator<Item = Operation>) {
     for op in ops {
         match op {
             Operation::Insert(i) => {
+                assert_eq!(oracle.contains(&i), set1.contains(i));
                 assert_eq!(oracle.insert(i), set1.insert(i));
                 set2.insert(i);
                 assert_eq!(set1, set2);
@@ -67,6 +70,7 @@ pub(crate) fn test_set(ops: impl IntoIterator<Item = Operation>) {
                 assert_eq!(oracle.len(), set1.len());
             }
             Operation::Remove(i) => {
+                assert_eq!(oracle.contains(&i), set1.contains(i));
                 assert_eq!(oracle.remove(&i), set1.remove(i));
                 set2.remove(i);
                 assert_eq!(set1, set2);

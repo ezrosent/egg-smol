@@ -13,7 +13,7 @@ use crate::node::{merge_leaves, Child, Item};
 mod tests;
 
 /// A map from 64-bit integers to values.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IntMap<V, State> {
     len: usize,
     state: State,

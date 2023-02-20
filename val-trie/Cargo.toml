@@ -10,3 +10,10 @@ edition = "2021"
 [dev-dependencies]
 rand = "0.8.4"
 hashbrown = "0.13"
+criterion = "0.4"
+rustc-hash = "1.1"
+im = "15.1"
+
+[[bench]]
+name = "int_map"
+harness = false
