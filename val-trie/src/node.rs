@@ -1,13 +1,11 @@
 //! Interior nodes for the trie.
 
 use std::{
+    fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
     mem,
     rc::Rc,
 };
-
-#[cfg(test)]
-mod tests;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
@@ -50,6 +48,16 @@ impl<T: Item + PartialEq> PartialEq for Child<T> {
             (Child::Leaf(l), Child::Leaf(r)) => l == r,
             (Child::Null, Child::Null) => true,
             _ => false,
+        }
+    }
+}
+
+impl<T> Child<T> {
+    pub(crate) fn for_each(&self, f: &mut impl FnMut(&T)) {
+        match self {
+            Child::Inner(n) => n.for_each(f),
+            Child::Leaf(l) => f(l),
+            Child::Null => {}
         }
     }
 }
@@ -176,6 +184,10 @@ impl<T> Node<T> {
         }
     }
 
+    fn for_each(&self, f: &mut impl FnMut(&T)) {
+        self.children.iter().for_each(|c| c.for_each(f))
+    }
+
     fn consume_prefix(&mut self, bits: usize) {
         debug_assert!(bits <= self.prefix_len());
         debug_assert_eq!(bits % R::BITS, 0);
@@ -211,7 +223,11 @@ impl<T> Node<T> {
 }
 
 fn truncate(prefix: u64, len: usize) -> u64 {
-    prefix & ((!0) << (len as u32))
+    if len == 0 {
+        0
+    } else {
+        prefix & (!0u64).wrapping_shl(64 - len as u32)
+    }
 }
 
 /// Given two items, compute an interior node containing them. 'bits' is a
@@ -229,7 +245,6 @@ pub(crate) fn merge_leaves<T: Item + Clone>(
     debug_assert_eq!(node.bitset.len(), 0);
     debug_assert_ne!(k1, k2);
     debug_assert_ne!(k1 << bits, k2 << bits);
-    debug_assert_ne!(k1 << (bits + R::BITS), k2 << (bits + R::BITS));
 
     let bits = bits as u32;
     let shifted_1 = k1 << bits;
@@ -262,25 +277,6 @@ impl<T: Item + Clone> Node<T> {
         }
         self.hash = h.finish() as u32;
     }
-
-    pub(crate) fn lookup(&self, key: u64, mut bits: usize) -> Option<&T> {
-        debug_assert!(
-            bits + self.prefix_len() < 64,
-            "bits={bits}, prefix_len={}",
-            self.prefix_len()
-        );
-        let cur = key << bits;
-        if !self.prefix_matches(cur) {
-            return None;
-        }
-        bits += self.prefix_len();
-        match &self.children[next_node(key, bits)] {
-            Child::Inner(node) => node.lookup(key, bits + R::BITS),
-            Child::Leaf(elt) => Some(elt),
-            Child::Null => None,
-        }
-    }
-
     pub(crate) fn mutate(
         self: &mut Rc<Self>,
         key: u64,
@@ -300,6 +296,24 @@ impl<T: Item + Clone> Node<T> {
             slf.children[next_node(key, bits)].mutate(key, bits + R::BITS, build_hasher, modify);
         slf.update_hash(&mut build_hasher.build_hasher());
         res
+    }
+
+    pub(crate) fn lookup(&self, key: u64, mut bits: usize) -> Option<&T> {
+        debug_assert!(
+            bits + self.prefix_len() < 64,
+            "bits={bits}, prefix_len={}",
+            self.prefix_len()
+        );
+        let cur = key << bits;
+        if !self.prefix_matches(cur) {
+            return None;
+        }
+        bits += self.prefix_len();
+        match &self.children[next_node(key, bits)] {
+            Child::Inner(node) => node.lookup(key, bits + R::BITS),
+            Child::Leaf(elt) => Some(elt),
+            Child::Null => None,
+        }
     }
 
     pub(crate) fn insert(
@@ -325,7 +339,7 @@ impl<T: Item + Clone> Node<T> {
                     *l = on_merge(Some(l));
                 }
                 x @ Child::Leaf(_) => {
-                    // Wre have a leaf that does not match. We need to compute
+                    // We have a leaf that does not match. We need to compute
                     // the shared prefix and insert a new interior node with the
                     // current leaf and the new leaf as children.
 
