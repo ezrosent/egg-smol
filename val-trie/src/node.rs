@@ -3,14 +3,9 @@
 use std::{
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
-    mem,
+    mem::{self},
     rc::Rc,
 };
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
-struct Bitset(u32);
-const MAX_CHILDREN: usize = mem::size_of::<Bitset>() * 8;
 
 trait Radix {
     const BITS: usize;
@@ -416,13 +411,17 @@ impl<T: Item + Clone> Node<T> {
 #[inline(always)]
 fn next_node(key: u64, bits: usize) -> usize {
     const OFFSET: usize = 64 - R::BITS;
-    // ((key >> (OFFSET.saturating_sub(bits))) % (R::ARITY as u64)) as usize
-    (((key << bits) >> OFFSET) % (R::ARITY as u64)) as usize
+    ((key << bits) >> OFFSET) as usize
 }
 
 pub(crate) trait Item {
     fn key(&self) -> u64;
 }
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
+struct Bitset(u32);
+const MAX_CHILDREN: usize = mem::size_of::<Bitset>() * 8;
 
 impl Bitset {
     fn clear(&mut self) {

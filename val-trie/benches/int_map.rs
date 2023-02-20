@@ -1,12 +1,12 @@
 use std::hash::BuildHasherDefault;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use hashbrown::HashMap;
-use rand::{distributions::Uniform, prelude::Distribution};
+use hashbrown::{HashMap, HashSet};
+use rand::{distributions::Uniform, prelude::Distribution, Rng};
 use rustc_hash::FxHasher;
 use val_trie::IntMap;
 
-fn lookup_test<M: MapLike>(c: &mut Criterion) {
+fn lookup_test_dense<M: MapLike>(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("Lookups (Dense, {})", M::NAME));
     let mut rng = rand::thread_rng();
     const BATCH_SIZE: usize = 1024;
@@ -44,6 +44,51 @@ fn lookup_test<M: MapLike>(c: &mut Criterion) {
     }
 }
 
+fn lookup_test_random<M: MapLike>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("Lookups (Random, {})", M::NAME));
+    let mut rng = rand::thread_rng();
+    const BATCH_SIZE: usize = 1024;
+    for map_size in [1u64 << 10, 1 << 17, 1 << 25] {
+        // Generate `map_size` unique integers
+        let mut set: HashSet<u64> = HashSet::with_capacity(map_size as usize);
+        while set.len() < map_size as usize {
+            set.insert(rng.gen());
+        }
+        let mut map = M::default();
+        for i in &set {
+            map.add(*i, *i);
+        }
+
+        group.throughput(Throughput::Elements(BATCH_SIZE as u64));
+        group.bench_with_input(format!("hits, size={map_size}"), &map, |b, i| {
+            let mut elts = Vec::with_capacity(BATCH_SIZE);
+            for elt in set.iter().take(BATCH_SIZE) {
+                elts.push(*elt);
+            }
+            b.iter(|| {
+                for elt in &elts {
+                    black_box(i.lookup(*elt));
+                }
+            })
+        });
+        group.bench_with_input(format!("misses, size={map_size}"), &map, |b, i| {
+            let mut elts = Vec::with_capacity(BATCH_SIZE);
+            for _ in 0..BATCH_SIZE {
+                let mut candidate = rng.gen();
+                while set.contains(&candidate) {
+                    candidate = rng.gen();
+                }
+                elts.push(candidate);
+            }
+            b.iter(|| {
+                for elt in &elts {
+                    black_box(i.lookup(*elt));
+                }
+            })
+        });
+    }
+}
+
 // Benchmarks:
 // * sparse lookups
 // * test hashmap (where the map in question is a key) lookups (no sharing, some sharing)
@@ -57,9 +102,12 @@ trait MapLike: Clone + Eq + Default {
 
 criterion_group!(
     benches,
-    lookup_test::<HashBrown>,
-    lookup_test::<ImMap>,
-    lookup_test::<ValTrie>,
+    lookup_test_dense::<HashBrown>,
+    lookup_test_dense::<ImMap>,
+    lookup_test_dense::<ValTrie>,
+    lookup_test_random::<HashBrown>,
+    lookup_test_random::<ImMap>,
+    lookup_test_random::<ValTrie>,
 );
 
 criterion_main!(benches);
