@@ -32,6 +32,10 @@ impl Radix for Radix4 {
     const BITS: usize = 4;
 }
 
+// NB: with generic constants we can parameterize the entire node by its radix.
+// For now, we just keep 4 and 5 around and swap them out manually to
+// test/validate assumptions. (e.g. Radix 4 leads to a deeper trie, but
+// round_down is going to be faster).
 type R = Radix5;
 
 #[derive(Clone, Debug)]
