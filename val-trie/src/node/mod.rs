@@ -7,6 +7,9 @@ use std::{
     rc::Rc,
 };
 
+mod chunk;
+mod new_node;
+
 trait Radix {
     const BITS: usize;
     const ARITY: usize = 1 << Self::BITS;
@@ -328,6 +331,7 @@ impl<T: Item + Clone> Node<T> {
             self.prefix_len()
         );
         bits += self.prefix_len();
+
         match &self.children[next_node(key, bits)] {
             Child::Inner(node) => node.lookup_internal(key, bits + R::BITS),
             Child::Leaf(elt) => Some(elt),
