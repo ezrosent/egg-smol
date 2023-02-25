@@ -8,7 +8,6 @@ use std::{
 };
 
 mod chunk;
-pub(crate) mod new_node;
 #[cfg(test)]
 mod tests;
 

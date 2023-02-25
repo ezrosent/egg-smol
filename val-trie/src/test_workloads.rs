@@ -5,7 +5,7 @@ use std::{
 
 use hashbrown::HashSet;
 
-use crate::{IntMap, IntSet, NewIntSet};
+use crate::{IntMap, IntSet};
 
 #[derive(Debug)]
 pub(crate) enum Operation {
@@ -82,44 +82,6 @@ pub(crate) fn test_set(ops: impl IntoIterator<Item = Operation>) {
                 let v1: Vec<u64> = oracle.iter().copied().collect();
                 let mut v2: Vec<u64> = Default::default();
                 set1.for_each(|i| v2.push(i));
-                assert_eq!(v1, v2);
-                for val in v1 {
-                    assert_eq!(oracle.contains(&val), set1.contains(val));
-                }
-            }
-        }
-    }
-}
-
-pub(crate) fn test_new_set(ops: impl IntoIterator<Item = Operation>) {
-    let mut oracle = BTreeSet::<u64>::new();
-    let mut set1 = NewIntSet::default();
-    let mut set2 = NewIntSet::default();
-    for op in ops {
-        eprintln!("{op:?}");
-        match op {
-            Operation::Insert(i) => {
-                assert_eq!(oracle.contains(&i), set1.contains(i));
-                assert_eq!(oracle.insert(i), set1.insert(i));
-                set2.insert(i);
-                assert_eq!(set1, set2);
-                assert_eq!(oracle.contains(&i), set1.contains(i));
-                assert_eq!(oracle.len(), set1.len());
-            }
-            Operation::Remove(i) => {
-                assert_eq!(oracle.contains(&i), set1.contains(i));
-                assert_eq!(oracle.remove(&i), set1.remove(i));
-                set2.remove(i);
-                assert_eq!(set1, set2);
-                assert_eq!(oracle.contains(&i), set1.contains(i));
-                assert_eq!(oracle.len(), set1.len());
-            }
-            Operation::Dump => {
-                assert_eq!(oracle.len(), set1.len());
-                let v1: Vec<u64> = oracle.iter().copied().collect();
-                let mut v2: Vec<u64> = Default::default();
-                set1.for_each(|i| v2.push(i));
-                v2.sort();
                 assert_eq!(v1, v2);
                 for val in v1 {
                     assert_eq!(oracle.contains(&val), set1.contains(val));

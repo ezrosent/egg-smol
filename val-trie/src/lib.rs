@@ -38,6 +38,7 @@
 //! The core `node` module is structured in a way that would make a general
 //! Hash Table possible to implement.
 
+pub(crate) mod hash_node;
 pub(crate) mod map;
 pub(crate) mod node;
 pub(crate) mod set;
@@ -47,4 +48,4 @@ pub(crate) mod test_workloads;
 pub use map::IntMap;
 pub use set::IntSet;
 
-pub use node::new_node::IntSet as NewIntSet;
+// pub use node::new_node::IntSet as NewIntSet;
