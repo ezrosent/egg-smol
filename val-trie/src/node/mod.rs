@@ -8,7 +8,9 @@ use std::{
 };
 
 mod chunk;
-mod new_node;
+pub(crate) mod new_node;
+#[cfg(test)]
+mod tests;
 
 trait Radix {
     const BITS: usize;

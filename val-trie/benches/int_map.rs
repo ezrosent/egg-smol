@@ -4,7 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughpu
 use hashbrown::{HashMap, HashSet};
 use rand::{distributions::Uniform, prelude::Distribution, Rng};
 use rustc_hash::FxHasher;
-use val_trie::IntMap;
+use val_trie::{IntMap, NewIntSet};
 
 fn lookup_test_dense<M: MapLike>(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("Lookups (Dense, {})", M::NAME));
@@ -146,12 +146,15 @@ criterion_group!(
     comparison::<HashBrown>,
     comparison::<ImMap>,
     comparison::<ValTrie>,
+    comparison::<NewIntSet>,
     lookup_test_dense::<HashBrown>,
     lookup_test_dense::<ImMap>,
     lookup_test_dense::<ValTrie>,
+    lookup_test_dense::<NewIntSet>,
     lookup_test_random::<HashBrown>,
     lookup_test_random::<ImMap>,
     lookup_test_random::<ValTrie>,
+    lookup_test_random::<NewIntSet>,
 );
 
 criterion_main!(benches);
@@ -199,5 +202,20 @@ impl MapLike for ImMap {
     }
     fn remove(&mut self, k: u64) {
         self.remove(&k);
+    }
+}
+
+// TODO: not a fair comparison until we implement a map this is just here as a
+// baseline.
+impl MapLike for NewIntSet {
+    const NAME: &'static str = "new-set";
+    fn add(&mut self, k: u64, _v: u64) {
+        self.insert(k);
+    }
+    fn lookup(&self, k: u64) -> bool {
+        self.contains(k)
+    }
+    fn remove(&mut self, k: u64) {
+        self.remove(k);
     }
 }

@@ -1,12 +1,12 @@
 use std::{
     hash::{BuildHasher, BuildHasherDefault, Hash, Hasher},
-    mem::{ManuallyDrop, MaybeUninit},
+    mem::{self, ManuallyDrop, MaybeUninit},
     rc::Rc,
 };
 
 use rustc_hash::FxHasher;
 
-use super::{Radix, R};
+use super::{Item, Radix, R};
 
 type H = BuildHasherDefault<FxHasher>;
 
@@ -54,7 +54,32 @@ fn remove_hash(summary: u64, to_remove: u64) -> u64 {
 
 // High-level operations:
 
-impl<T: Hash + Clone> Chunk<T> {
+impl<T: Hash + Clone + Item> Chunk<T> {
+    pub(crate) fn for_each(&self, f: &mut impl FnMut(&T)) {
+        for i in 0..R::ARITY {
+            let k = self.kind(i);
+            if k == NULL {
+                continue;
+            }
+            if k == INNER {
+                unsafe { self.get_inner(i).for_each(f) }
+            }
+            if k == LEAF {
+                unsafe { f(self.get_leaf(i)) }
+            }
+        }
+    }
+    pub(crate) fn contains_key(&self, key: u64, bits: usize) -> bool {
+        let child = (key >> bits) as usize % R::ARITY;
+        let k = self.kind(child);
+        if k == NULL {
+            return false;
+        }
+        if k == INNER {
+            return unsafe { self.get_inner(child).contains_key(key, bits + R::BITS) };
+        }
+        unsafe { self.get_leaf(child).key() == key }
+    }
     pub(crate) fn get(&self, key: u64, bits: usize) -> Option<&T> {
         let child = (key >> bits) as usize % R::ARITY;
         let k = self.kind(child);
@@ -67,28 +92,88 @@ impl<T: Hash + Clone> Chunk<T> {
         unsafe { Some(self.get_leaf(child)) }
     }
 
-    pub(crate) fn insert(&mut self, key: u64, bits: usize, elt: T) {
-        let please_remove_after_insert_is_more_general = 1;
+    pub(crate) fn insert(&mut self, key: u64, bits: usize, elt: T) -> Option<T> {
         let child = (key >> bits) as usize % R::ARITY;
         let k = self.kind(child);
         if k == NULL {
             unsafe { self.set_leaf(child, elt) };
-            return;
+            return None;
         }
         if k == INNER {
-            unsafe {
-                self.modify_chunk(child, |chunk| {
-                    chunk.insert(key, bits + R::BITS, elt);
+            return unsafe {
+                self.modify_chunk(child, move |chunk| chunk.insert(key, bits + R::BITS, elt))
+            };
+        }
+        unsafe {
+            let res = self.modify_leaf(child, |cur| {
+                if cur.key() == key {
+                    Ok(mem::replace(cur, elt))
+                } else {
+                    Err(elt)
+                }
+            });
+            let elt = match res {
+                Ok(prev) => return Some(prev),
+                Err(elt) => elt,
+            };
+
+            self.replace_leaf_chunk(child, move |leaf| {
+                let other = leaf.key();
+                let mut new_chunk = Chunk::default();
+                let _res1 = new_chunk.insert(other, bits + R::BITS, leaf);
+                let _res2 = new_chunk.insert(key, bits + R::BITS, elt);
+                debug_assert!(_res1.is_none());
+                debug_assert!(_res2.is_none());
+                Rc::new(new_chunk)
+            });
+            None
+        }
+    }
+
+    pub(crate) fn remove(
+        &mut self,
+        key: u64,
+        bits: usize,
+        remove: impl FnOnce(&T) -> bool,
+    ) -> Option<T> {
+        let child = (key >> bits) as usize % R::ARITY;
+        let k = self.kind(child);
+        if k == NULL {
+            return None;
+        }
+        if k == INNER {
+            let mut promote_final = None;
+            let res = unsafe {
+                let promote_ref = &mut promote_final;
+                self.modify_chunk(child, move |chunk| {
+                    let res = chunk.remove(key, bits + R::BITS, remove);
+                    if res.is_none() && chunk.has_one_element() {
+                        *promote_ref = Some(chunk.min_elt());
+                    }
+                    res
                 })
             };
-            return;
+            if let Some(last) = promote_final {
+                unsafe {
+                    self.replace_chunk_leaf(child, |mut chunk| {
+                        Rc::make_mut(&mut chunk).remove_leaf(last as usize)
+                    })
+                }
+            }
+            return res;
         }
-        // Two leaves
-        todo!()
+        unsafe {
+            if remove(self.get_leaf(child)) {
+                Some(self.remove_leaf(child))
+            } else {
+                None
+            }
+        }
     }
 }
 
-// Low-level / unsafe ops
+// Low-level / unsafe ops. Many of these can likely be made safe, but we'll want
+// to get a performance baseline first.
 
 impl<T> Chunk<T> {
     pub(crate) fn n_children(&self) -> usize {
@@ -97,6 +182,10 @@ impl<T> Chunk<T> {
     pub(crate) fn has_one_element(&self) -> bool {
         self.bs.is_power_of_two()
     }
+    pub(crate) fn min_elt(&self) -> u32 {
+        self.bs.trailing_zeros()
+    }
+
     pub(crate) fn kind(&self, i: usize) -> Kind {
         debug_assert!(i <= R::ARITY);
         Kind(((self.bs >> (i * 2)) % 4) as u32)
@@ -122,7 +211,29 @@ impl<T> Chunk<T> {
 
 impl<T: Hash> Chunk<T> {
     pub(crate) fn set_kind(&mut self, i: usize, k: Kind) {
-        self.bs |= (k.0 as u64) << (i * 2)
+        #[inline(always)]
+        fn null_mask(bit: usize) -> u64 {
+            !set_mask(bit)
+        }
+        #[inline(always)]
+        fn set_mask(bit: usize) -> u64 {
+            1u64 << bit as u32
+        }
+        match k.0 {
+            0 => {
+                self.bs &= null_mask(2 * i);
+                self.bs &= null_mask(2 * i + 1);
+            }
+            1 => {
+                self.bs |= set_mask(2 * i);
+                self.bs &= null_mask(2 * i + 1);
+            }
+            2 => {
+                self.bs &= null_mask(2 * i);
+                self.bs |= set_mask(2 * i + 1);
+            }
+            _ => unreachable!(),
+        }
     }
 
     pub(crate) unsafe fn set_leaf(&mut self, i: usize, t: T) {
@@ -189,13 +300,18 @@ impl<T: Hash> Chunk<T> {
         self.set_kind(i, LEAF);
     }
 
-    pub(crate) unsafe fn modify_leaf(&mut self, i: usize, modify: impl FnOnce(&mut T)) {
+    pub(crate) unsafe fn modify_leaf<R>(
+        &mut self,
+        i: usize,
+        modify: impl FnOnce(&mut T) -> R,
+    ) -> R {
         debug_assert_eq!(self.kind(i), LEAF);
         let child_ptr = self.child_ptr(i);
         let leaf = &mut (*child_ptr).leaf;
         self.hash = remove_hash(self.hash, hash_value(leaf));
-        modify(leaf);
+        let res = modify(leaf);
         self.hash = combine_hashes(self.hash, hash_value(leaf));
+        res
     }
 
     pub(crate) unsafe fn remove_leaf(&mut self, i: usize) -> T {
@@ -209,13 +325,18 @@ impl<T: Hash> Chunk<T> {
 }
 
 impl<T: Hash + Clone> Chunk<T> {
-    pub(crate) unsafe fn modify_chunk(&mut self, i: usize, modify: impl FnOnce(&mut Chunk<T>)) {
+    pub(crate) unsafe fn modify_chunk<R>(
+        &mut self,
+        i: usize,
+        modify: impl FnOnce(&mut Chunk<T>) -> R,
+    ) -> R {
         debug_assert_eq!(self.kind(i), INNER);
         let child_ptr = self.child_ptr(i);
         let chunk = Rc::make_mut(&mut (*child_ptr).ptr);
         self.hash = remove_hash(self.hash, chunk.hash);
-        modify(chunk);
+        let res = modify(chunk);
         self.hash = combine_hashes(self.hash, chunk.hash);
+        res
     }
 }
 

@@ -46,3 +46,5 @@ pub(crate) mod test_workloads;
 
 pub use map::IntMap;
 pub use set::IntSet;
+
+pub use node::new_node::IntSet as NewIntSet;
