@@ -1,3 +1,4 @@
+//! Underlying node representation for the maps.
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -26,6 +27,9 @@ pub(crate) trait HashItem: Clone {
 }
 
 pub(crate) struct Chunk<T> {
+    // Rather than store an array of enums, pack the enum discriminant into a
+    // bitset and then store untagged unions as children. This saves us ~2x
+    // space for small Ts.
     bs: u64,
     hash: HashBits,
     len: u32,
@@ -61,10 +65,6 @@ impl<T: PartialEq> PartialEq for CollisionNode<T> {
         true
     }
 }
-
-// TODO: comments
-// TODO: insertion benchmarks
-// TODO: reevaluate whether to recompute hashes for leaf / collisions
 
 impl<T: HashItem> Chunk<T> {
     pub(crate) fn for_each(&self, mut f: &mut impl FnMut(&T)) {

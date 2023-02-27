@@ -53,50 +53,50 @@ pub(crate) fn test_hash_map(ops: impl IntoIterator<Item = Operation>) {
     }
 }
 
-pub(crate) fn test_hash_set_collision(ops: impl IntoIterator<Item = Operation>) {
-    let mut oracle = BTreeSet::<Collider>::new();
-    let mut set1 = HashSet::default();
-    let mut set2 = HashSet::default();
-    fn collider(i: u64) -> (Collider, Collider) {
-        (Collider(i, 0), Collider(i, 1))
-    }
+pub(crate) fn test_hash_map_collision(ops: impl IntoIterator<Item = Operation>) {
+    let mut oracle = BTreeMap::<Collider, u64>::new();
+    let mut map1 = HashMap::default();
+    let mut map2 = HashMap::default();
     for op in ops {
         match op {
             Operation::Insert(i) => {
-                let (c1, c2) = collider(i);
-                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
-                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
-                assert_eq!(oracle.insert(c1), set1.insert(c1));
-                assert_eq!(oracle.insert(c2), set1.insert(c2));
-                set2.insert(c1);
-                set2.insert(c2);
-                assert_eq!(set1, set2);
-                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
-                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
-                assert_eq!(oracle.len(), set1.len());
+                let (k1, k2) = collider(i);
+                let v = i + 1;
+                assert_eq!(oracle.get(&k1), map1.get(&k1));
+                assert_eq!(oracle.get(&k2), map1.get(&k2));
+                assert_eq!(oracle.insert(k1, v), map1.insert(k1, v));
+                assert_eq!(oracle.insert(k2, v), map1.insert(k2, v));
+                map2.insert(k2, v);
+                map2.insert(k1, v);
+                assert_eq!(map1, map2);
+                assert_eq!(oracle.get(&k1), map1.get(&k1));
+                assert_eq!(oracle.get(&k2), map1.get(&k2));
+                assert_eq!(oracle.contains_key(&k1), map1.contains_key(&k1));
+                assert_eq!(oracle.contains_key(&k2), map1.contains_key(&k2));
+                assert_eq!(oracle.len(), map1.len());
             }
             Operation::Remove(i) => {
-                let (c1, c2) = collider(i);
-                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
-                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
-                assert_eq!(oracle.remove(&c1), set1.remove(&c1));
-                assert_eq!(oracle.remove(&c2), set1.remove(&c2));
-                set2.remove(&c1);
-                set2.remove(&c2);
-                assert_eq!(set1, set2);
-                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
-                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
-                assert_eq!(oracle.len(), set1.len());
+                let (k1, k2) = collider(i);
+                assert_eq!(oracle.contains_key(&k1), map1.contains_key(&k1));
+                assert_eq!(oracle.contains_key(&k2), map1.contains_key(&k2));
+                assert_eq!(oracle.remove(&k2), map1.remove(&k2));
+                assert_eq!(oracle.remove(&k1), map1.remove(&k1));
+                map2.remove(&k1);
+                map2.remove(&k2);
+                assert_eq!(map1, map2);
+                assert_eq!(oracle.contains_key(&k2), map1.contains_key(&k2));
+                assert_eq!(oracle.contains_key(&k1), map1.contains_key(&k1));
+                assert_eq!(oracle.len(), map1.len());
             }
             Operation::Dump => {
-                assert_eq!(oracle.len(), set1.len());
-                let v1: Vec<Collider> = oracle.iter().copied().collect();
-                let mut v2: Vec<Collider> = Default::default();
-                set1.for_each(|i| v2.push(*i));
+                assert_eq!(oracle.len(), map1.len());
+                let v1: Vec<(Collider, u64)> = oracle.iter().map(|(k, v)| (*k, *v)).collect();
+                let mut v2: Vec<(Collider, u64)> = Default::default();
+                map1.for_each(|k, v| v2.push((*k, *v)));
                 v2.sort();
                 assert_eq!(v1, v2);
-                for val in v1 {
-                    assert_eq!(oracle.contains(&val), set1.contains(&val));
+                for (k, _) in v1 {
+                    assert_eq!(oracle.get(&k), map1.get(&k));
                 }
             }
         }
@@ -140,6 +140,54 @@ pub(crate) fn test_hash_set(ops: impl IntoIterator<Item = Operation>) {
     }
 }
 
+pub(crate) fn test_hash_set_collision(ops: impl IntoIterator<Item = Operation>) {
+    let mut oracle = BTreeSet::<Collider>::new();
+    let mut set1 = HashSet::default();
+    let mut set2 = HashSet::default();
+
+    for op in ops {
+        match op {
+            Operation::Insert(i) => {
+                let (c1, c2) = collider(i);
+                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
+                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
+                assert_eq!(oracle.insert(c1), set1.insert(c1));
+                assert_eq!(oracle.insert(c2), set1.insert(c2));
+                set2.insert(c2);
+                set2.insert(c1);
+                assert_eq!(set1, set2);
+                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
+                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
+                assert_eq!(oracle.len(), set1.len());
+            }
+            Operation::Remove(i) => {
+                let (c1, c2) = collider(i);
+                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
+                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
+                assert_eq!(oracle.remove(&c1), set1.remove(&c1));
+                assert_eq!(oracle.remove(&c2), set1.remove(&c2));
+                set2.remove(&c1);
+                set2.remove(&c2);
+                assert_eq!(set1, set2);
+                assert_eq!(oracle.contains(&c1), set1.contains(&c1));
+                assert_eq!(oracle.contains(&c2), set1.contains(&c2));
+                assert_eq!(oracle.len(), set1.len());
+            }
+            Operation::Dump => {
+                assert_eq!(oracle.len(), set1.len());
+                let v1: Vec<Collider> = oracle.iter().copied().collect();
+                let mut v2: Vec<Collider> = Default::default();
+                set1.for_each(|i| v2.push(*i));
+                v2.sort();
+                assert_eq!(v1, v2);
+                for val in v1 {
+                    assert_eq!(oracle.contains(&val), set1.contains(&val));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Eq, PartialOrd, Ord, Debug)]
 struct Collider(u64, u64);
 
@@ -153,6 +201,10 @@ impl PartialEq for Collider {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0 && self.1 == other.1
     }
+}
+
+fn collider(i: u64) -> (Collider, Collider) {
+    (Collider(i, 0), Collider(i, 1))
 }
 
 pub(crate) fn insert_remove_sparse() -> impl Iterator<Item = Operation> {

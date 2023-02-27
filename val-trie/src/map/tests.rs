@@ -1,4 +1,4 @@
-use crate::test_workloads::{self, test_hash_map};
+use crate::test_workloads::{self, test_hash_map, test_hash_map_collision};
 
 #[test]
 fn insert_remove_hash_dense() {
@@ -8,4 +8,14 @@ fn insert_remove_hash_dense() {
 #[test]
 fn insert_remove_hash_sparse() {
     test_hash_map(test_workloads::insert_remove_sparse())
+}
+
+#[test]
+fn insert_remove_hash_dense_collisions() {
+    test_hash_map_collision(test_workloads::insert_remove_dense())
+}
+
+#[test]
+fn insert_remove_hash_sparse_collisions() {
+    test_hash_map_collision(test_workloads::insert_remove_sparse())
 }
