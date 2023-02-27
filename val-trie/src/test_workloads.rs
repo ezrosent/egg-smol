@@ -4,7 +4,7 @@ use std::{
     iter::once,
 };
 
-use crate::{HashSet, IntMap, IntSet};
+use crate::{hash_node::Chunk, map::hash_map::HashMap, HashSet, IntMap, IntSet};
 
 #[derive(Debug)]
 pub(crate) enum Operation {
@@ -47,6 +47,46 @@ pub(crate) fn test_map(ops: impl IntoIterator<Item = Operation>) {
                 assert_eq!(v1, v2);
                 for (k, _) in v1 {
                     assert_eq!(oracle.get(&k), map1.get(k));
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn test_hash_map(ops: impl IntoIterator<Item = Operation>) {
+    let mut oracle = BTreeMap::<u64, u64>::new();
+    let mut map1 = HashMap::default();
+    let mut map2 = HashMap::default();
+    for op in ops {
+        match op {
+            Operation::Insert(i) => {
+                let k = i;
+                let v = i + 1;
+                assert_eq!(oracle.get(&k), map1.get(&k));
+                assert_eq!(oracle.insert(k, v), map1.insert(k, v));
+                map2.insert(k, v);
+                assert_eq!(map1, map2);
+                assert_eq!(oracle.get(&k), map1.get(&k));
+                assert_eq!(oracle.contains_key(&k), map1.contains_key(&k));
+                assert_eq!(oracle.len(), map1.len());
+            }
+            Operation::Remove(i) => {
+                assert_eq!(oracle.contains_key(&i), map1.contains_key(&i));
+                assert_eq!(oracle.remove(&i), map1.remove(&i));
+                map2.remove(&i);
+                assert_eq!(map1, map2);
+                assert_eq!(oracle.contains_key(&i), map1.contains_key(&i));
+                assert_eq!(oracle.len(), map1.len());
+            }
+            Operation::Dump => {
+                assert_eq!(oracle.len(), map1.len());
+                let v1: Vec<(u64, u64)> = oracle.iter().map(|(k, v)| (*k, *v)).collect();
+                let mut v2: Vec<(u64, u64)> = Default::default();
+                map1.for_each(|k, v| v2.push((*k, *v)));
+                v2.sort();
+                assert_eq!(v1, v2);
+                for (k, _) in v1 {
+                    assert_eq!(oracle.get(&k), map1.get(&k));
                 }
             }
         }

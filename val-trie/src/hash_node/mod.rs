@@ -32,21 +32,36 @@ pub(crate) struct Chunk<T> {
     children: MaybeUninit<[Child<T>; ARITY]>,
 }
 
-type Leaf<T> = (T, HashBits);
+type Leaf<T> = T;
 
 union Child<T> {
     inner: ManuallyDrop<Rc<Chunk<T>>>,
     leaf: ManuallyDrop<Leaf<T>>,
-    collision: ManuallyDrop<CollisionNode<T>>,
+    collision: ManuallyDrop<Rc<CollisionNode<T>>>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Eq)]
 struct CollisionNode<T> {
     hash: HashBits,
     data: Vec<T>,
 }
 
-// TODO: hash table, hash set implementation
+impl<T: PartialEq> PartialEq for CollisionNode<T> {
+    fn eq(&self, other: &Self) -> bool {
+        // O(n^2) comparison: we'll want to use a different data-structure if
+        // this becomes a problem.
+        if self.hash != other.hash || self.data.len() != other.data.len() {
+            return false;
+        }
+        for l in &self.data {
+            if !other.data.iter().any(|x| x == l) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 // TODO: comments
 // TODO: insertion benchmarks
 // TODO: reevaluate whether to recompute hashes for leaf / collisions
@@ -56,7 +71,7 @@ impl<T: HashItem> Chunk<T> {
         for child in 0..ARITY {
             match self.get_kind(child) {
                 Kind::Null => {}
-                Kind::Leaf => f(&self.get_leaf(child).0),
+                Kind::Leaf => f(self.get_leaf(child)),
                 Kind::Collision => {
                     let collision = self.get_collision(child);
                     collision.data.iter().for_each(&mut f);
@@ -74,7 +89,7 @@ impl<T: HashItem> Chunk<T> {
         match self.get_kind(child) {
             Kind::Null => None,
             Kind::Leaf => {
-                let (candidate, _) = self.get_leaf(child);
+                let candidate = self.get_leaf(child);
                 if candidate.key() == key {
                     Some(candidate)
                 } else {
@@ -100,31 +115,38 @@ impl<T: HashItem> Chunk<T> {
         let child = Self::mask(hash, bits);
         match self.get_kind(child) {
             Kind::Null => {
-                self.add_leaf(child, (elt, hash));
+                self.add_leaf(child, elt, hash);
                 None
             }
             Kind::Leaf => {
-                let (candidate, h) = self.get_leaf(child);
+                let candidate = self.get_leaf(child);
                 if elt.key() == candidate.key() {
-                    self.with_leaf_mut(child, |(prev, _)| {
+                    self.with_leaf_mut(child, |prev| {
                         mem::swap(prev, &mut elt);
                     });
-                    Some(elt)
-                } else if *h == hash {
+                    return Some(elt);
+                }
+                let other_hash = hash_value(candidate.key());
+                if other_hash == hash {
                     // we have a hash collision
-                    self.replace_leaf_collision(child, |(prev, _)| CollisionNode {
-                        hash,
-                        data: vec![prev, elt],
+                    self.replace_leaf_collision(child, |prev| {
+                        (
+                            CollisionNode {
+                                hash,
+                                data: vec![prev, elt],
+                            },
+                            hash,
+                        )
                     });
                     None
                 } else {
                     // We need to split this node: the hashes are distinct.
-                    self.replace_leaf_chunk(child, |(other, other_hash)| {
+                    self.replace_leaf_chunk(child, |other| {
                         let mut res = Chunk::default();
                         let next_bits = bits + BITS as u32;
                         res.insert(other, other_hash, next_bits);
                         res.insert(elt, hash, next_bits);
-                        Rc::new(res)
+                        (Rc::new(res), other_hash)
                     });
                     None
                 }
@@ -165,9 +187,7 @@ impl<T: HashItem> Chunk<T> {
         let child = Self::mask(hash, bits);
         match self.get_kind(child) {
             Kind::Null => None,
-            Kind::Leaf => self
-                .remove_leaf(child, |(leaf, _)| leaf.key() == key)
-                .map(|(x, _)| x),
+            Kind::Leaf => self.remove_leaf(child, |leaf| (leaf.key() == key, hash)),
             Kind::Collision => {
                 let collision = self.get_collision(child);
                 if collision.hash != hash {
@@ -188,8 +208,8 @@ impl<T: HashItem> Chunk<T> {
                     // replace the collision with a leaf.
                     Some(self.replace_collision_leaf(child, |mut collision| {
                         let res = collision.data.swap_remove(to_remove);
-                        let leaf = (collision.data.pop().unwrap(), collision.hash);
-                        (res, leaf)
+                        let leaf = collision.data.pop().unwrap();
+                        (res, leaf, collision.hash)
                     }))
                 } else {
                     // Remove the element from the node
@@ -226,11 +246,11 @@ impl<T: HashItem> Chunk<T> {
         self.hash ^= hc;
     }
 
-    fn add_leaf(&mut self, i: usize, leaf: Leaf<T>) {
+    fn add_leaf(&mut self, i: usize, leaf: Leaf<T>, hash: HashBits) {
         assert_eq!(self.get_kind(i), Kind::Null);
         assert!(i < ARITY);
         unsafe {
-            self.add_hash(leaf.1);
+            self.add_hash(hash);
             self.child_ptr_mut(i).write(Child {
                 leaf: ManuallyDrop::new(leaf),
             })
@@ -244,21 +264,25 @@ impl<T: HashItem> Chunk<T> {
         unsafe {
             self.add_hash(collision.hash);
             self.child_ptr_mut(i).write(Child {
-                collision: ManuallyDrop::new(collision),
+                collision: ManuallyDrop::new(Rc::new(collision)),
             })
         }
         self.set_kind(i, Kind::Collision);
         self.len += 1;
     }
 
-    fn replace_leaf_chunk(&mut self, i: usize, chunk: impl FnOnce(Leaf<T>) -> Rc<Chunk<T>>) {
+    fn replace_leaf_chunk(
+        &mut self,
+        i: usize,
+        chunk: impl FnOnce(Leaf<T>) -> (Rc<Chunk<T>>, HashBits),
+    ) {
         assert_eq!(self.get_kind(i), Kind::Leaf);
         assert!(i < ARITY);
         unsafe {
             let ptr = self.child_ptr_mut(i);
             let leaf = ManuallyDrop::into_inner(ptr.read().leaf);
-            self.remove_hash(leaf.1);
-            let inner = chunk(leaf);
+            let (inner, prev_hash) = chunk(leaf);
+            self.remove_hash(prev_hash);
             self.add_hash(inner.hash);
             ptr.write(Child {
                 inner: ManuallyDrop::new(inner),
@@ -276,7 +300,10 @@ impl<T: HashItem> Chunk<T> {
         assert!(i < ARITY);
         unsafe {
             let ptr = self.child_ptr_mut(i);
-            let collision = ManuallyDrop::into_inner(ptr.read().collision);
+            let collision_ptr = ManuallyDrop::into_inner(ptr.read().collision);
+            // NB: once its stable, we can use Rc::unwrap_or_clone
+            let collision = unwrap_or_clone(collision_ptr);
+            // let collision = Rc::unwrap_or_clone();
             self.remove_hash(collision.hash);
             let inner = chunk(collision);
             self.add_hash(inner.hash);
@@ -290,7 +317,7 @@ impl<T: HashItem> Chunk<T> {
     fn replace_collision_leaf<R>(
         &mut self,
         i: usize,
-        leaf: impl FnOnce(CollisionNode<T>) -> (R, Leaf<T>),
+        leaf: impl FnOnce(CollisionNode<T>) -> (R, Leaf<T>, HashBits),
     ) -> R {
         assert_eq!(self.get_kind(i), Kind::Collision);
         assert!(i < ARITY);
@@ -298,8 +325,8 @@ impl<T: HashItem> Chunk<T> {
             let ptr = self.child_ptr_mut(i);
             let collision = ManuallyDrop::into_inner(ptr.read().collision);
             self.remove_hash(collision.hash);
-            let (res, leaf) = leaf(collision);
-            self.add_hash(leaf.1);
+            let (res, leaf, leaf_hash) = leaf(unwrap_or_clone(collision));
+            self.add_hash(leaf_hash);
             ptr.write(Child {
                 leaf: ManuallyDrop::new(leaf),
             });
@@ -343,18 +370,18 @@ impl<T: HashItem> Chunk<T> {
     fn replace_leaf_collision(
         &mut self,
         i: usize,
-        collision: impl FnOnce(Leaf<T>) -> CollisionNode<T>,
+        collision: impl FnOnce(Leaf<T>) -> (CollisionNode<T>, HashBits),
     ) {
         assert_eq!(self.get_kind(i), Kind::Leaf);
         assert!(i < ARITY);
         unsafe {
             let ptr = self.child_ptr_mut(i);
             let leaf = ManuallyDrop::into_inner(ptr.read().leaf);
-            self.remove_hash(leaf.1);
-            let collision = collision(leaf);
+            let (collision, leaf_hash) = collision(leaf);
+            self.remove_hash(leaf_hash);
             self.add_hash(collision.hash);
             ptr.write(Child {
-                collision: ManuallyDrop::new(collision),
+                collision: ManuallyDrop::new(Rc::new(collision)),
             });
         }
         self.set_kind(i, Kind::Collision);
@@ -362,13 +389,18 @@ impl<T: HashItem> Chunk<T> {
 
     // "setters" are CPS-d so we can properly adjust hashcodes.
 
-    fn remove_leaf(&mut self, i: usize, f: impl FnOnce(&Leaf<T>) -> bool) -> Option<Leaf<T>> {
+    fn remove_leaf(
+        &mut self,
+        i: usize,
+        f: impl FnOnce(&Leaf<T>) -> (bool, HashBits),
+    ) -> Option<Leaf<T>> {
         assert_eq!(self.get_kind(i), Kind::Leaf);
         assert!(i < 32);
         unsafe {
             let ptr = self.child_ptr_mut(i);
             let leaf = &(&*ptr).leaf;
-            if !f(leaf) {
+            let (remove, hash) = f(leaf);
+            if !remove {
                 return None;
             }
             // remove
@@ -376,7 +408,7 @@ impl<T: HashItem> Chunk<T> {
             // Borrow of `leaf` is over
 
             // Safe because remove_hash only touches the hash code
-            self.remove_hash(leaf.1);
+            self.remove_hash(hash);
             self.len -= 1;
             self.set_kind(i, Kind::Null);
             // Safe because `ptr` is no longer reachable with Kind::Null.
@@ -391,10 +423,8 @@ impl<T: HashItem> Chunk<T> {
             let child = &mut *self.child_ptr_mut(i);
             &mut child.leaf
         };
-        self.remove_hash(leaf.1);
-        let res = f(leaf);
-        self.add_hash(leaf.1);
-        res
+        // We don't both updating the hash here. It should not change.
+        f(leaf)
     }
 
     fn with_collision_mut<R>(&mut self, i: usize, f: impl FnOnce(&mut CollisionNode<T>) -> R) -> R {
@@ -402,7 +432,7 @@ impl<T: HashItem> Chunk<T> {
         assert!(i < 32);
         let node: &mut CollisionNode<T> = unsafe {
             let child = &mut *self.child_ptr_mut(i);
-            &mut child.collision
+            Rc::make_mut(&mut child.collision)
         };
         self.remove_hash(node.hash);
         let res = f(node);
@@ -479,7 +509,8 @@ impl<T> Chunk<T> {
     unsafe fn child_ptr_mut(&mut self, i: usize) -> *mut Child<T> {
         (self.children.as_mut_ptr() as *mut Child<T>).add(i)
     }
-    fn get_leaf(&self, i: usize) -> &(T, HashBits) {
+
+    fn get_leaf(&self, i: usize) -> &T {
         assert_eq!(self.get_kind(i), Kind::Leaf);
         assert!(i < ARITY);
         unsafe {
@@ -488,7 +519,7 @@ impl<T> Chunk<T> {
         }
     }
 
-    fn get_collision(&self, i: usize) -> &CollisionNode<T> {
+    fn get_collision(&self, i: usize) -> &Rc<CollisionNode<T>> {
         assert_eq!(self.get_kind(i), Kind::Collision);
         assert!(i < ARITY);
         unsafe {
@@ -540,7 +571,12 @@ impl<T: PartialEq> PartialEq for Chunk<T> {
                     }
                 }
                 Kind::Collision => {
-                    if self.get_collision(i) != other.get_collision(i) {
+                    let l = self.get_collision(i);
+                    let r = other.get_collision(i);
+                    if Rc::ptr_eq(l, r) {
+                        continue;
+                    }
+                    if l != r {
                         return false;
                     }
                 }
@@ -647,4 +683,15 @@ impl<T: fmt::Debug> fmt::Debug for Chunk<T> {
         }
         write!(f, "}}")
     }
+}
+
+fn unwrap_or_clone<T: Clone>(rc: Rc<T>) -> T {
+    Rc::try_unwrap(rc).unwrap_or_else(|mut ptr| {
+        Rc::make_mut(&mut ptr);
+        if let Ok(x) = Rc::try_unwrap(ptr) {
+            x
+        } else {
+            unreachable!()
+        }
+    })
 }

@@ -9,6 +9,7 @@ use std::{
 
 use crate::node::{merge_leaves, Child, Item};
 
+pub(crate) mod hash_map;
 #[cfg(test)]
 mod tests;
 
