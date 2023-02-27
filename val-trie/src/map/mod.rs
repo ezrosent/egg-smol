@@ -1,45 +1,29 @@
-//! A persistent map with integer keys optimized for efficient comparison and
-//! hashing.
-
+//! Hash maps optimized to represent values in egglog.
 use std::{
-    hash::{BuildHasher, Hash, Hasher},
-    mem,
+    hash::{Hash, Hasher},
     rc::Rc,
 };
 
-use crate::node::{merge_leaves, Child, Item};
+use crate::node::{hash_value, Chunk, HashItem};
 
-pub(crate) mod hash_map;
 #[cfg(test)]
 mod tests;
 
-/// A map from 64-bit integers to values.
-#[derive(Debug, Clone)]
-pub struct IntMap<V, State> {
+/// A persistent map data-structure.
+#[derive(Debug)]
+pub struct HashMap<K, V> {
     len: usize,
-    state: State,
-    data: Child<(u64, V)>,
+    node: Rc<Chunk<Pair<K, V>>>,
 }
 
-impl<V: Clone, State: BuildHasher> IntMap<V, State> {
-    /// Construct a set with a given hasher.
-    ///
-    /// Note that two equal sets constructed with different hashers are not
-    /// guaranteed to compare as equal.
-    pub fn with_hasher(state: State) -> IntMap<V, State> {
-        IntMap {
-            len: 0,
-            state,
-            data: Default::default(),
-        }
+impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V> {
+    /// Apply `f` to the map's contents. The order in which `f` is applied is
+    /// unspecified.
+    pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
+        self.node.for_each(&mut |pair| f(pair.key(), pair.value()))
     }
 
-    /// Call `f` on each element of the map, in sorted order.
-    pub fn for_each(&self, mut f: impl FnMut(u64, &V)) {
-        self.data.for_each(&mut |(k, v)| f(*k, v))
-    }
-
-    /// The current size of the map.
+    /// The number of entries currently in the map.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -49,114 +33,86 @@ impl<V: Clone, State: BuildHasher> IntMap<V, State> {
         self.len() == 0
     }
 
-    /// Test whether `k` is present in the map.
-    pub fn contains_key(&self, k: u64) -> bool {
-        self.get(k).is_some()
+    /// Look up the mapping corresponding to `k` in the map, if it is present.
+    pub fn get(&self, k: &K) -> Option<&V> {
+        let hash = hash_value(k);
+        Some(self.node.get(k, hash, 0)?.value())
     }
 
-    /// Get the value corresponding to `k` if it is present in the map.
-    pub fn get(&self, k: u64) -> Option<&V> {
-        match &self.data {
-            Child::Inner(n) => {
-                let (key, v) = n.lookup(k, 0)?;
-                if *key == k {
-                    Some(v)
-                } else {
-                    None
-                }
-            }
-            Child::Leaf((key, v)) => {
-                if *key == k {
-                    Some(v)
-                } else {
-                    None
-                }
-            }
-            Child::Null => None,
-        }
+    /// Whether or not a mapping for the key `k` is in the map.
+    pub fn contains_key(&self, k: &K) -> bool {
+        let hash = hash_value(k);
+        self.node.get(k, hash, 0).is_some()
     }
 
-    /// Insert `k` into the map, mapped to `v`, returning the old value if it
-    /// was present.
-    pub fn insert(&mut self, k: u64, mut v: V) -> Option<V> {
-        let mut prev = None;
-        match &mut self.data {
-            Child::Inner(n) => {
-                let prev_ref = &mut prev;
-                n.insert(k, 0, &self.state, move |was: Option<&(u64, V)>| {
-                    if let Some((_k, prev_val)) = was {
-                        debug_assert_eq!(k, *_k);
-                        *prev_ref = Some(prev_val.clone());
-                    }
-                    (k, v)
-                });
-            }
-            Child::Leaf((key, val)) => {
-                if *key == k {
-                    mem::swap(&mut v, val);
-                    prev = Some(v);
-                } else {
-                    // To avoid cloning 'v', do a couple swaps.
-                    let leaf = mem::replace(&mut self.data, Child::Inner(Default::default()));
-                    let (key, val) = if let Child::Leaf(x) = leaf {
-                        x
-                    } else {
-                        unreachable!()
-                    };
-                    let node = if let Child::Inner(n) = &mut self.data {
-                        Rc::make_mut(n)
-                    } else {
-                        unreachable!()
-                    };
-                    merge_leaves((key, val), (k, v), 0, node, &mut self.state.build_hasher());
-                }
-            }
-            x @ Child::Null => *x = Child::Leaf((k, v)),
-        }
-        if prev.is_none() {
+    /// Insert `k` mapped to `v` in the map, returning the previous value
+    /// mapping to `k` if one was there.
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        let hash = hash_value(&k);
+        let res = Rc::make_mut(&mut self.node).insert(Pair(k, v), hash, 0);
+        if let Some(prev) = res {
+            Some(prev.1)
+        } else {
             self.len += 1;
+            None
         }
-        prev
     }
 
-    /// Remove `k` from the set, return true if `k` was not previously in the
-    /// set.
-    pub fn remove(&mut self, k: u64) -> Option<V> {
-        let (_, v) = self
-            .data
-            .mutate(k, 0, &self.state, &mut |(key, _)| k == *key)?;
+    /// Remove the mapping associated with `k` from the map. Return the
+    /// corresponding value if such a mapping was present.
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        let hash = hash_value(k);
+        let res = Rc::make_mut(&mut self.node).remove(k, hash, 0)?;
         self.len -= 1;
-        Some(v)
+        Some(res.1)
     }
 }
 
-impl<V: Clone> Item for (u64, V) {
-    fn key(&self) -> u64 {
-        self.0
+impl<K: PartialEq, V: PartialEq> PartialEq for HashMap<K, V> {
+    fn eq(&self, other: &HashMap<K, V>) -> bool {
+        self.len == other.len && (Rc::ptr_eq(&self.node, &other.node) || self.node == other.node)
     }
 }
 
-impl<V, State: BuildHasher + Default> Default for IntMap<V, State> {
-    fn default() -> Self {
-        IntMap {
-            len: Default::default(),
-            state: Default::default(),
-            data: Default::default(),
-        }
-    }
-}
+impl<K: Eq, V: Eq> Eq for HashMap<K, V> {}
 
-impl<V: Clone + PartialEq, State> PartialEq for IntMap<V, State> {
-    fn eq(&self, other: &Self) -> bool {
-        self.len == other.len && self.data == other.data
-    }
-}
-
-impl<V: Clone + Eq, State> Eq for IntMap<V, State> {}
-
-impl<V: Hash + Clone, State> Hash for IntMap<V, State> {
+impl<K, V> Hash for HashMap<K, V> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.len.hash(state);
-        self.data.hash(state);
+        self.node.hash(state);
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+struct Pair<K, V>(K, V);
+
+impl<K, V> Pair<K, V> {
+    fn value(&self) -> &V {
+        &self.1
+    }
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> HashItem for Pair<K, V> {
+    type Key = K;
+    fn key(&self) -> &K {
+        &self.0
+    }
+}
+
+impl<K, V> Default for HashMap<K, V> {
+    fn default() -> HashMap<K, V> {
+        HashMap {
+            len: 0,
+            node: Default::default(),
+        }
+    }
+}
+
+impl<K, V> Clone for HashMap<K, V> {
+    fn clone(&self) -> HashMap<K, V> {
+        HashMap {
+            len: self.len,
+            node: self.node.clone(),
+        }
     }
 }

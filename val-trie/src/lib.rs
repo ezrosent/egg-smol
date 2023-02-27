@@ -29,16 +29,11 @@
 //! are also more space-efficient than `im`'s: interior nodes with 8-byte
 //! payloads are almost half as large.
 
-pub(crate) mod hash_node;
 pub(crate) mod map;
 pub(crate) mod node;
 pub(crate) mod set;
 #[cfg(test)]
 pub(crate) mod test_workloads;
 
-pub use map::hash_map::HashMap;
-pub use map::IntMap;
-pub use set::hash_set::HashSet;
-pub use set::IntSet;
-
-// pub use node::new_node::IntSet as NewIntSet;
+pub use map::HashMap;
+pub use set::HashSet;

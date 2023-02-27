@@ -1,42 +1,38 @@
-//! A persistent integer set optimized for efficient comparison and hashing.
+//! Hash sets optimized to represent values in egglog.
 use std::{
-    hash::{BuildHasher, Hash, Hasher},
+    fmt,
+    hash::{Hash, Hasher},
     rc::Rc,
 };
 
-use crate::node::{merge_leaves, Child, Item, Node};
+use crate::node::{hash_value, Chunk, HashItem};
 
-pub(crate) mod hash_set;
 #[cfg(test)]
 mod tests;
 
-/// A set of 64-bit integers.
+/// A persistent set data-structure.
 #[derive(Debug, Clone)]
-pub struct IntSet<State> {
+pub struct HashSet<T> {
     len: usize,
-    state: State,
-    data: Child<u64>,
+    node: Rc<Chunk<Inline<T>>>,
 }
 
-impl<State: BuildHasher> IntSet<State> {
-    /// Construct a set with a given hasher.
-    ///
-    /// Note that two equal sets constructed with different hashers are not
-    /// guaranteed to compare as equal.
-    pub fn with_hasher(state: State) -> IntSet<State> {
-        IntSet {
+impl<T> Default for HashSet<T> {
+    fn default() -> Self {
+        HashSet {
             len: 0,
-            state,
-            data: Default::default(),
+            node: Default::default(),
         }
     }
+}
 
-    /// Call `f` on each element of the set, in sorted order.
-    pub fn for_each(&self, mut f: impl FnMut(u64)) {
-        self.data.for_each(&mut |x| f(*x))
+impl<T: Hash + Eq + Clone> HashSet<T> {
+    /// Apply `f` to each of the elements in the set. The order is unspecified.
+    pub fn for_each(&self, mut f: impl FnMut(&T)) {
+        self.node.for_each(&mut |x| f(&x.0))
     }
 
-    /// The current size of the set.
+    /// The number of elements in the set.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -46,90 +42,59 @@ impl<State: BuildHasher> IntSet<State> {
         self.len() == 0
     }
 
-    /// Test whether `k` is present in the set.
-    pub fn contains(&self, k: u64) -> bool {
-        match &self.data {
-            Child::Inner(n) => n.lookup(k.key(), 0) == Some(&k),
-            Child::Leaf(l) => k == *l,
-            Child::Null => false,
-        }
+    /// Whether or not the set contains `t`.
+    pub fn contains(&self, t: &T) -> bool {
+        let hash = hash_value(t);
+        self.node.get(t, hash, 0).is_some()
     }
 
-    /// Insert `k` into the set, return true if `k` was not previously in the
-    /// set.
-    pub fn insert(&mut self, k: u64) -> bool {
-        let res = match &mut self.data {
-            Child::Inner(n) => {
-                let mut inserted = true;
-                n.insert(k.key(), 0, &self.state, |prev| {
-                    inserted = prev.is_none();
-                    k
-                });
-                inserted
-            }
-            Child::Leaf(l) => {
-                if *l == k {
-                    false
-                } else {
-                    let mut node = Node::default();
-                    merge_leaves(*l, k, 0, &mut node, &mut self.state.build_hasher());
-                    self.data = Child::Inner(Rc::new(node));
-                    true
-                }
-            }
-            Child::Null => {
-                self.data = Child::Leaf(k);
-                true
-            }
-        };
-
-        if res {
-            self.len += 1;
-        }
-
+    /// Insert `t` into the set. Returns whether or not a new element was inserted.
+    pub fn insert(&mut self, t: T) -> bool {
+        let hash = hash_value(&t);
+        let res = Rc::make_mut(&mut self.node)
+            .insert(Inline(t), hash, 0)
+            .is_none();
+        self.len += res as usize;
         res
     }
 
-    /// Remove `k` from the set, return true if `k` was not previously in the set.
-    pub fn remove(&mut self, k: u64) -> bool {
-        let res = self
-            .data
-            .mutate(k.key(), 0, &self.state, &mut |x| *x == k)
-            .is_some();
-        if res {
-            self.len -= 1;
-        }
+    /// Remove `t` from the set, if it is there. Returns whether or not `t` was
+    /// present.
+    pub fn remove(&mut self, t: &T) -> bool {
+        let hash = hash_value(&t);
+        let res = Rc::make_mut(&mut self.node).remove(t, hash, 0).is_some();
+        self.len -= res as usize;
         res
     }
 }
 
-impl Item for u64 {
-    fn key(&self) -> u64 {
-        *self
+impl<T: PartialEq> PartialEq for HashSet<T> {
+    fn eq(&self, other: &HashSet<T>) -> bool {
+        self.len == other.len && (Rc::ptr_eq(&self.node, &other.node) || self.node == other.node)
     }
 }
 
-impl<State> PartialEq for IntSet<State> {
-    fn eq(&self, other: &Self) -> bool {
-        self.len == other.len && self.data == other.data
-    }
-}
+impl<T: Eq> Eq for HashSet<T> {}
 
-impl<State> Eq for IntSet<State> {}
-
-impl<State> Hash for IntSet<State> {
+impl<T> Hash for HashSet<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.len.hash(state);
-        self.data.hash(state);
+        self.node.hash(state)
     }
 }
 
-impl<State: BuildHasher + Default> Default for IntSet<State> {
-    fn default() -> Self {
-        IntSet {
-            len: Default::default(),
-            state: Default::default(),
-            data: Default::default(),
-        }
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct Inline<T>(T);
+
+impl<T: fmt::Debug> fmt::Debug for Inline<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: Hash + Eq + Clone> HashItem for Inline<T> {
+    type Key = T;
+    fn key(&self) -> &T {
+        &self.0
     }
 }
