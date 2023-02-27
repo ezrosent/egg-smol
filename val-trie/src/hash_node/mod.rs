@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     hash::{Hash, Hasher},
     mem::{self, ManuallyDrop, MaybeUninit},
     rc::Rc,
@@ -45,7 +46,29 @@ struct CollisionNode<T> {
     data: Vec<T>,
 }
 
+// TODO: hash table, hash set implementation
+// TODO: comments
+// TODO: insertion benchmarks
+// TODO: reevaluate whether to recompute hashes for leaf / collisions
+
 impl<T: HashItem> Chunk<T> {
+    pub(crate) fn for_each(&self, mut f: &mut impl FnMut(&T)) {
+        for child in 0..ARITY {
+            match self.get_kind(child) {
+                Kind::Null => {}
+                Kind::Leaf => f(&self.get_leaf(child).0),
+                Kind::Collision => {
+                    let collision = self.get_collision(child);
+                    collision.data.iter().for_each(&mut f);
+                }
+                Kind::Inner => {
+                    let inner = self.get_inner(child);
+                    inner.for_each(f)
+                }
+            }
+        }
+    }
+
     pub(crate) fn get(&self, key: &T::Key, hash: u32, bits: u32) -> Option<&T> {
         let child = Self::mask(hash, bits);
         match self.get_kind(child) {
@@ -193,12 +216,6 @@ impl<T: HashItem> Chunk<T> {
         ((hash >> bits) % ARITY as u32) as usize
     }
 
-    fn hash_value(v: &T) -> HashBits {
-        let mut hasher = FxHasher::default();
-        v.key().hash(&mut hasher);
-        hasher.finish() as HashBits
-    }
-
     /// Remove the given hashcode from the node's digest.
     fn remove_hash(&mut self, hc: u32) {
         self.hash ^= hc;
@@ -213,6 +230,7 @@ impl<T: HashItem> Chunk<T> {
         assert_eq!(self.get_kind(i), Kind::Null);
         assert!(i < ARITY);
         unsafe {
+            self.add_hash(leaf.1);
             self.child_ptr_mut(i).write(Child {
                 leaf: ManuallyDrop::new(leaf),
             })
@@ -221,14 +239,15 @@ impl<T: HashItem> Chunk<T> {
         self.len += 1;
     }
     fn add_collision(&mut self, i: usize, collision: CollisionNode<T>) {
-        assert_eq!(self.get_kind(i), Kind::Collision);
+        assert_eq!(self.get_kind(i), Kind::Null);
         assert!(i < ARITY);
         unsafe {
+            self.add_hash(collision.hash);
             self.child_ptr_mut(i).write(Child {
                 collision: ManuallyDrop::new(collision),
             })
         }
-        self.set_kind(i, Kind::Leaf);
+        self.set_kind(i, Kind::Collision);
         self.len += 1;
     }
 
@@ -437,6 +456,7 @@ impl<T: HashItem> Chunk<T> {
                 set_bit(&mut self.bs, 2 * i + 1);
             }
         }
+        debug_assert_eq!(self.get_kind(i as usize), k);
     }
 }
 
@@ -527,7 +547,7 @@ impl<T: PartialEq> PartialEq for Chunk<T> {
                 Kind::Inner => {
                     let inner_l = self.get_inner(i);
                     let inner_r = other.get_inner(i);
-                    if !Rc::ptr_eq(inner_l, inner_r) || inner_l != inner_r {
+                    if !Rc::ptr_eq(inner_l, inner_r) && inner_l != inner_r {
                         return false;
                     }
                 }
@@ -569,6 +589,62 @@ impl<T: Eq> Eq for Chunk<T> {}
 
 impl<T> Drop for Chunk<T> {
     fn drop(&mut self) {
-        todo!()
+        for i in 0..ARITY {
+            if self.len == 0 {
+                return;
+            }
+            match self.get_kind(i) {
+                Kind::Null => continue,
+                Kind::Leaf => unsafe {
+                    let child = &mut *self.child_ptr_mut(i);
+                    ManuallyDrop::drop(&mut child.leaf);
+                },
+                Kind::Collision => unsafe {
+                    let child = &mut *self.child_ptr_mut(i);
+                    ManuallyDrop::drop(&mut child.collision);
+                },
+                Kind::Inner => unsafe {
+                    let child = &mut *self.child_ptr_mut(i);
+                    ManuallyDrop::drop(&mut child.inner);
+                },
+            }
+            self.len -= 1;
+        }
+    }
+}
+
+pub(crate) fn hash_value(k: &impl Hash) -> HashBits {
+    let mut hasher = FxHasher::default();
+    k.hash(&mut hasher);
+    hasher.finish() as HashBits
+}
+
+impl<T: fmt::Debug> fmt::Debug for Chunk<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Chunk{{")?;
+        write!(f, "len: {:?}, ", self.len)?;
+        write!(f, "hash: {:?}, ", self.hash)?;
+        write!(f, "bs: {:064b}, ", self.bs)?;
+        writeln!(f, "children: [")?;
+        for i in 0..ARITY {
+            let is_last = i == ARITY - 1;
+            let suffix = if is_last { "]" } else { ", " };
+            match self.get_kind(i) {
+                Kind::Null => write!(f, "Null{suffix}")?,
+                Kind::Leaf => write!(f, "<{:?}>{suffix}", self.get_leaf(i))?,
+                Kind::Collision => {
+                    let collision = self.get_collision(i);
+                    write!(
+                        f,
+                        "<hash:{:?}, {:?}>{suffix}",
+                        collision.hash, &collision.data
+                    )?;
+                }
+                Kind::Inner => {
+                    write!(f, "{:?}{suffix}", self.get_inner(i))?;
+                }
+            }
+        }
+        write!(f, "}}")
     }
 }

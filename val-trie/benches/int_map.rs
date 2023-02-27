@@ -146,12 +146,15 @@ criterion_group!(
     comparison::<HashBrown>,
     comparison::<ImMap>,
     comparison::<ValTrie>,
+    comparison::<VHashSet>,
     lookup_test_dense::<HashBrown>,
     lookup_test_dense::<ImMap>,
     lookup_test_dense::<ValTrie>,
+    lookup_test_dense::<VHashSet>,
     lookup_test_random::<HashBrown>,
     lookup_test_random::<ImMap>,
     lookup_test_random::<ValTrie>,
+    lookup_test_random::<VHashSet>,
 );
 
 criterion_main!(benches);
@@ -159,6 +162,7 @@ criterion_main!(benches);
 type ValTrie = IntMap<u64, BuildHasherDefault<FxHasher>>;
 type HashBrown = HashMap<u64, u64, BuildHasherDefault<FxHasher>>;
 type ImMap = im::HashMap<u64, u64, BuildHasherDefault<FxHasher>>;
+type VHashSet = val_trie::HashSet<u64>;
 
 impl MapLike for ValTrie {
     const NAME: &'static str = "int-map";
@@ -196,6 +200,20 @@ impl MapLike for ImMap {
 
     fn lookup(&self, k: u64) -> bool {
         self.contains_key(&k)
+    }
+    fn remove(&mut self, k: u64) {
+        self.remove(&k);
+    }
+}
+
+impl MapLike for VHashSet {
+    const NAME: &'static str = "val-hashset";
+    fn add(&mut self, k: u64, _v: u64) {
+        self.insert(k);
+    }
+
+    fn lookup(&self, k: u64) -> bool {
+        self.contains(&k)
     }
     fn remove(&mut self, k: u64) {
         self.remove(&k);
