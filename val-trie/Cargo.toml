@@ -7,10 +7,10 @@ edition = "2021"
 
 [dependencies]
 rustc-hash = "1.1"
+hashbrown = "0.13"
 
 [dev-dependencies]
 rand = "0.8.4"
-hashbrown = "0.13"
 criterion = "0.4"
 im = "15.1"
 

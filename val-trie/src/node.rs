@@ -1,7 +1,8 @@
 //! Underlying node representation for the maps.
 use std::{
+    borrow::Borrow,
     fmt,
-    hash::{Hash, Hasher},
+    hash::{BuildHasherDefault, Hash, Hasher},
     mem::{self, ManuallyDrop, MaybeUninit},
     rc::Rc,
 };
@@ -66,11 +67,35 @@ impl<T: PartialEq> PartialEq for CollisionNode<T> {
     }
 }
 
+/// Mutate all of the keys in each of the given chunks, transitively.
+///
+/// This function will look for equivalent nodes and use them to reduce the
+/// number of times `f` is called on tables with equivalent subtrees. The
+/// resulting chunks will have more structural sharing, which will make future
+/// comparisons cheaper.
+///
+/// This function _must not_ mutate the "keys" of the map. It makes no effort to
+/// rearrange the structure of the tree itself, meaning that perturbation of
+/// hash keys could break data-structure invariants.
+pub(crate) fn apply_in_place<'a, T: HashItem + Eq + 'a>(
+    chunks: impl Iterator<Item = &'a mut Rc<Chunk<T>>>,
+    mut f: impl FnMut(&mut T),
+) {
+    let mut pool = NodePool::default();
+    for chunk in chunks {
+        pool.apply_in_place(chunk, &mut f);
+    }
+}
+
 impl<T: HashItem> Chunk<T> {
     pub(crate) fn for_each(&self, mut f: &mut impl FnMut(&T)) {
+        let mut remaining = self.len;
         for child in 0..ARITY {
+            if remaining == 0 {
+                break;
+            }
             match self.get_kind(child) {
-                Kind::Null => {}
+                Kind::Null => continue,
                 Kind::Leaf => f(self.get_leaf(child)),
                 Kind::Collision => {
                     let collision = self.get_collision(child);
@@ -81,6 +106,7 @@ impl<T: HashItem> Chunk<T> {
                     inner.for_each(f)
                 }
             }
+            remaining -= 1;
         }
     }
 
@@ -424,7 +450,10 @@ impl<T: HashItem> Chunk<T> {
             &mut child.leaf
         };
         // We don't both updating the hash here. It should not change.
-        f(leaf)
+        let _old_hash = hash_value(leaf.key());
+        let res = f(leaf);
+        debug_assert_eq!(_old_hash, hash_value(leaf.key()));
+        res
     }
 
     fn with_collision_mut<R>(&mut self, i: usize, f: impl FnOnce(&mut CollisionNode<T>) -> R) -> R {
@@ -534,6 +563,109 @@ impl<T> Chunk<T> {
         unsafe {
             let child = &*self.child_ptr(i);
             &child.inner
+        }
+    }
+
+    // mutable getters -- prefer the `with_` methods.
+
+    fn get_leaf_mut(&mut self, i: usize) -> &mut T {
+        assert_eq!(self.get_kind(i), Kind::Leaf);
+        assert!(i < ARITY);
+        unsafe {
+            let child = &mut *self.child_ptr_mut(i);
+            &mut child.leaf
+        }
+    }
+
+    fn get_collision_mut(&mut self, i: usize) -> &mut Rc<CollisionNode<T>> {
+        assert_eq!(self.get_kind(i), Kind::Collision);
+        assert!(i < ARITY);
+        unsafe {
+            let child = &mut *self.child_ptr_mut(i);
+            &mut child.collision
+        }
+    }
+
+    fn get_inner_mut(&mut self, i: usize) -> &mut Rc<Chunk<T>> {
+        assert_eq!(self.get_kind(i), Kind::Collision);
+        assert!(i < ARITY);
+        unsafe {
+            let child = &mut *self.child_ptr_mut(i);
+            &mut child.inner
+        }
+    }
+}
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+struct ByPointer<T>(Rc<T>);
+
+impl<T: PartialEq> PartialEq for ByPointer<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl<T: Eq> Eq for ByPointer<T> {}
+
+impl<T: Hash> Hash for ByPointer<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
+    }
+}
+
+impl<T> Borrow<Rc<T>> for ByPointer<T> {
+    fn borrow(&self) -> &Rc<T> {
+        &self.0
+    }
+}
+
+pub(crate) struct NodePool<T> {
+    table: HashMap<ByPointer<Chunk<T>>, Rc<Chunk<T>>>,
+}
+
+impl<T> Default for NodePool<T> {
+    fn default() -> NodePool<T> {
+        NodePool {
+            table: Default::default(),
+        }
+    }
+}
+
+impl<T: HashItem + Eq> NodePool<T> {
+    fn apply_in_place(&mut self, chunk: &mut Rc<Chunk<T>>, f: &mut impl FnMut(&mut T)) {
+        if let Some(res) = self.table.get(chunk) {
+            *chunk = res.clone();
+            return;
+        }
+        let prev = if Rc::strong_count(chunk) > 1 {
+            Some(chunk.clone())
+        } else {
+            None
+        };
+        let mut remaining = chunk.len;
+        let mut_chunk = Rc::make_mut(chunk);
+        for child in 0..ARITY {
+            if remaining == 0 {
+                break;
+            }
+            match mut_chunk.get_kind(child) {
+                Kind::Null => continue,
+                Kind::Leaf => {
+                    f(mut_chunk.get_leaf_mut(child));
+                }
+                Kind::Collision => {
+                    let collision = Rc::make_mut(mut_chunk.get_collision_mut(child));
+                    for leaf in &mut collision.data {
+                        f(leaf);
+                    }
+                }
+                Kind::Inner => self.apply_in_place(mut_chunk.get_inner_mut(child), f),
+            }
+            remaining -= 1;
+        }
+        if let Some(entry) = prev {
+            self.table.insert(ByPointer(entry), chunk.clone());
         }
     }
 }
