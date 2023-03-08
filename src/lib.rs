@@ -821,7 +821,7 @@ impl EGraph {
                 if should_run {
                     // TODO typecheck
                     let (cost, expr) = self.extract_zdd(expr)?;
-                    format!("Extracted with cost {cost}: {expr}")
+                    format!("Extracted (ZDD) with cost {cost}: {expr}")
                 } else {
                     "Skipping ZDD extraction.".into()
                 }

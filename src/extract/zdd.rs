@@ -62,9 +62,12 @@ impl<'a> zdds::Egraph for Extractor<'a> {
                 // TODO: confirm the indexes are up to date.
                 let index = func.indexes.last().unwrap();
                 for node in index.get(class).into_iter().flat_map(|x| {
-                    x.iter().copied().map(|offset| ENodeId::EqAble {
-                        func: *func_name,
-                        offset,
+                    x.iter().copied().filter_map(|offset| {
+                        func.nodes.get_index(offset as usize)?;
+                        Some(ENodeId::EqAble {
+                            func: *func_name,
+                            offset,
+                        })
                     })
                 }) {
                     self.node_ids.insert(node, *class);
@@ -72,7 +75,9 @@ impl<'a> zdds::Egraph for Extractor<'a> {
                 }
             }
         } else {
-            nodes.push(ENodeId::Prim(*class))
+            let node = ENodeId::Prim(*class);
+            self.node_ids.insert(node, *class);
+            nodes.push(node);
         }
     }
     fn get_children(&mut self, node: &ENodeId, classes: &mut Vec<Value>) {

@@ -82,9 +82,10 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
             let hi_cost = self.min_cost_set(table, memo, cost, rep.hi);
             match (lo_cost, hi_cost) {
                 (None, None) => None,
-                (None, Some((chain, opt))) => {
-                    Some((table.cons(rep.item.clone(), chain), opt + cost(&rep.item)))
-                }
+                (None, Some((chain, opt))) => Some((
+                    table.cons(rep.item.clone(), chain),
+                    opt.saturating_add(cost(&rep.item)),
+                )),
                 (Some(x), None) => Some(x),
                 (Some((lo_chain, lo_cost)), Some((hi_chain, hi_cost))) => {
                     let total_hi_cost = hi_cost.saturating_add(cost(&rep.item));
