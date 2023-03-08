@@ -429,6 +429,14 @@ pub(crate) fn desugar_command(
                 )
                 .collect()
         }
+        Command::ExtractZdd { e } => {
+            let fresh = desugar.get_fresh();
+            flatten_actions(&vec![Action::Let(fresh, e)], desugar)
+                .into_iter()
+                .map(NCommand::NormAction)
+                .chain(vec![NCommand::ExtractZdd { var: fresh }].into_iter())
+                .collect()
+        }
         Command::Check(facts) => {
             let mut res = vec![NCommand::Check(flatten_facts(&facts, desugar))];
 

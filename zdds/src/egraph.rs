@@ -20,16 +20,19 @@ pub trait Egraph {
     // Iterator<...>, but that is not stable yet.
 
     /// For a given EClass, push all of its component ENodes into the `nodes` vector.
-    fn expand_class(&self, class: &Self::EClassId, nodes: &mut Vec<Self::ENodeId>);
+    fn expand_class(&mut self, class: &Self::EClassId, nodes: &mut Vec<Self::ENodeId>);
     /// For a given ENode, push all of its children into the `classes` vector.
-    fn get_children(&self, node: &Self::ENodeId, classes: &mut Vec<Self::EClassId>);
+    fn get_children(&mut self, node: &Self::ENodeId, classes: &mut Vec<Self::EClassId>);
 
     fn cost(&self, node: &Self::ENodeId) -> usize;
 }
 
 /// Given an Egraph, pick the minimum-cost set of enodes to be used during
 /// extraction.
-pub fn choose_nodes<E: Egraph>(egraph: &E, root: E::EClassId) -> Option<(Vec<E::ENodeId>, usize)> {
+pub fn choose_nodes<E: Egraph>(
+    egraph: &mut E,
+    root: E::EClassId,
+) -> Option<(Vec<E::ENodeId>, usize)> {
     let extractor = Extractor::new(root, egraph);
     let (zdd_nodes, cost) = extractor.zdd.min_cost_set(|zdd_node| {
         if *zdd_node == INFINITY {
@@ -78,7 +81,7 @@ pub(crate) struct Extractor<E: Egraph> {
 }
 
 impl<E: Egraph> Extractor<E> {
-    pub(crate) fn new(root: E::EClassId, egraph: &E) -> Extractor<E> {
+    pub(crate) fn new(root: E::EClassId, egraph: &mut E) -> Extractor<E> {
         let mut visited = HashMap::default();
         let node_mapping = IndexSet::default();
         let pool = ZddPool::with_cache_size(1 << 20);
@@ -101,7 +104,7 @@ impl<E: Egraph> Extractor<E> {
         &mut self,
         visited: &mut HashMap<E::EClassId, Option<Zdd<ZddNode>>>,
         class: E::EClassId,
-        egraph: &E,
+        egraph: &mut E,
         pool: &Pool<E>,
     ) -> Zdd<ZddNode> {
         // Visited acts as both a memo cache (for completed nodes) and a cycle

@@ -104,29 +104,29 @@ impl Egraph for FakeEgraph {
     fn cost(&self, node: &usize) -> usize {
         self.nodes[*node].1
     }
-    fn expand_class(&self, class: &usize, nodes: &mut Vec<usize>) {
+    fn expand_class(&mut self, class: &usize, nodes: &mut Vec<usize>) {
         nodes.extend_from_slice(&self.classes[*class])
     }
-    fn get_children(&self, node: &usize, classes: &mut Vec<usize>) {
+    fn get_children(&mut self, node: &usize, classes: &mut Vec<usize>) {
         classes.extend_from_slice(&self.nodes[*node].0)
     }
 }
 
 #[test]
 fn extract_tiny_egraph() {
-    let egraph = FakeEgraph {
+    let mut egraph = FakeEgraph {
         nodes: vec![(vec![], 1)],
         classes: vec![vec![0]],
     };
 
-    let (nodes, cost) = choose_nodes(&egraph, 0).expect("extractio should succeed");
+    let (nodes, cost) = choose_nodes(&mut egraph, 0).expect("extractio should succeed");
     assert_eq!(cost, 1);
     assert_eq!(nodes, vec![0]);
 }
 
 #[test]
 fn extract_sharing() {
-    let egraph = FakeEgraph {
+    let mut egraph = FakeEgraph {
         classes: vec![
             // R
             vec![0],
@@ -150,7 +150,7 @@ fn extract_sharing() {
             (vec![], 1),
         ],
     };
-    let (nodes, cost) = choose_nodes(&egraph, 0).expect("extraction should succeed");
+    let (nodes, cost) = choose_nodes(&mut egraph, 0).expect("extraction should succeed");
     assert_eq!(nodes, vec![0, 3, 1]);
     assert_eq!(cost, 6);
 }

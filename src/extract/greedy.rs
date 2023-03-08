@@ -1,10 +1,12 @@
+//! Generic utilities for extracting expressions/terms from egg-smol values,
+//! using the "greedy" optimization strategy.
 use hashbrown::hash_map::Entry;
 
 use crate::ast::Symbol;
 use crate::util::HashMap;
 use crate::{EGraph, Expr, Function, Id, Value};
 
-type Cost = usize;
+use super::Cost;
 
 #[derive(Debug)]
 struct Node<'a> {

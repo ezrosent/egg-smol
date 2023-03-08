@@ -815,6 +815,17 @@ impl EGraph {
                     "Skipping extraction.".into()
                 }
             }
+
+            NCommand::ExtractZdd { var } => {
+                let expr = Expr::Var(var);
+                if should_run {
+                    // TODO typecheck
+                    let (cost, expr) = self.extract_zdd(expr)?;
+                    format!("Extracted with cost {cost}: {expr}")
+                } else {
+                    "Skipping ZDD extraction.".into()
+                }
+            }
             NCommand::Check(facts) => {
                 if should_run {
                     self.check_facts(&facts)?;
@@ -985,6 +996,15 @@ impl EGraph {
         Ok((cost, expr, exprs))
     }
 
+    pub fn extract_zdd(&mut self, e: Expr) -> Result<(usize, Expr), Error> {
+        let (_t, value) = self.eval_expr(&e, None, true)?;
+        if let Some((cost, expr)) = self.optimal_expr(value) {
+            Ok((cost, expr))
+        } else {
+            Err(Error::UnableToGroundZdd)
+        }
+    }
+
     pub fn declare_const(&mut self, name: Symbol, sort: &ArcSort) -> Result<(), Error> {
         assert!(sort.is_eq_sort());
         self.declare_function(
@@ -1153,6 +1173,8 @@ pub enum Error {
     ExpectFail,
     #[error("IO error: {0}: {1}")]
     IoError(PathBuf, std::io::Error),
+    #[error("ZDD-based extraction failed to produce finite expression")]
+    UnableToGroundZdd,
 }
 
 fn safe_shl(a: usize, b: usize) -> usize {

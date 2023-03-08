@@ -89,6 +89,9 @@ pub enum NCommand {
         variants: usize,
         var: Symbol,
     },
+    ExtractZdd {
+        var: Symbol,
+    },
     Check(Vec<NormFact>),
     Print(Symbol, usize),
     PrintSize(Symbol),
@@ -141,6 +144,7 @@ impl NCommand {
                 variants: *variants,
                 e: Expr::Var(*var),
             },
+            NCommand::ExtractZdd { var } => Command::ExtractZdd { e: Expr::Var(*var) },
             NCommand::Check(facts) => {
                 Command::Check(facts.iter().map(|fact| fact.to_fact()).collect())
             }
@@ -186,6 +190,7 @@ impl NCommand {
                 variants: *variants,
                 var: *var,
             },
+            NCommand::ExtractZdd { var } => NCommand::ExtractZdd { var: *var },
             NCommand::Check(facts) => {
                 NCommand::Check(facts.iter().map(|fact| fact.map_exprs(f)).collect())
             }
@@ -314,6 +319,9 @@ pub enum Command {
         variants: usize,
         e: Expr,
     },
+    ExtractZdd {
+        e: Expr,
+    },
     // TODO: this could just become an empty query
     Check(Vec<Fact>),
     Print(Symbol, usize),
@@ -413,6 +421,9 @@ impl Command {
                 Sexp::String(variants.to_string()),
                 e.to_sexp(),
             ]),
+            Command::ExtractZdd { e } => {
+                Sexp::List(vec![Sexp::String("extract-zdd".into()), e.to_sexp()])
+            }
             Command::Check(facts) => Sexp::List(
                 vec![Sexp::String("check".into())]
                     .into_iter()

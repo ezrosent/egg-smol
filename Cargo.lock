@@ -208,6 +208,7 @@ dependencies = [
  "symbol_table",
  "symbolic_expressions",
  "thiserror",
+ "zdds",
 ]
 
 [[package]]
