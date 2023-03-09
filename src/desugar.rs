@@ -429,12 +429,18 @@ pub(crate) fn desugar_command(
                 )
                 .collect()
         }
-        Command::ExtractZdd { e } => {
+        Command::ExtractZdd { e, cost_only } => {
             let fresh = desugar.get_fresh();
             flatten_actions(&vec![Action::Let(fresh, e)], desugar)
                 .into_iter()
                 .map(NCommand::NormAction)
-                .chain(vec![NCommand::ExtractZdd { var: fresh }].into_iter())
+                .chain(
+                    vec![NCommand::ExtractZdd {
+                        var: fresh,
+                        cost_only,
+                    }]
+                    .into_iter(),
+                )
                 .collect()
         }
         Command::Check(facts) => {

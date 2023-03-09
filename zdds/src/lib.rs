@@ -9,4 +9,4 @@ pub(crate) mod zdd;
 mod tests;
 
 pub use egraph::{choose_nodes, Egraph};
-pub use zdd::{Zdd, ZddPool};
+pub use zdd::{Report, Zdd, ZddPool};

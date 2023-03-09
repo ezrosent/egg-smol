@@ -1,10 +1,19 @@
 //! The core ZDD implementation. This implementation currently only supports a
 //! limited subset of operations.
-use std::{cell::RefCell, cmp::Ordering, hash::Hash, rc::Rc};
+use std::{
+    cell::RefCell,
+    cmp::Ordering,
+    fmt,
+    hash::{BuildHasherDefault, Hash},
+    rc::Rc,
+};
 
 use crate::fixed_cache::Cache;
-use hashbrown::HashMap;
 use indexmap::IndexSet;
+use rustc_hash::FxHasher;
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, BuildHasherDefault<FxHasher>>;
+type HashSet<T> = hashbrown::HashSet<T, BuildHasherDefault<FxHasher>>;
 
 /// A shared pool of nodes and caches used to speed up ZDD operations. Clones of
 /// a pool yield a handle to the same underlying collection of nodes: Zdds can
@@ -32,7 +41,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPool<T> {
 }
 
 pub(crate) struct ZddPoolRep<T> {
-    nodes: IndexSet<Node<T>>,
+    nodes: IndexSet<Node<T>, BuildHasherDefault<FxHasher>>,
     cache: Cache<(NodeId, NodeId, Operation), NodeId>,
 }
 
@@ -280,6 +289,36 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
         }
         self.union_nodes(node, hi)
     }
+    fn dfs(&self, node_id: NodeId, visited: &mut HashSet<NodeId>) {
+        if !visited.insert(node_id) {
+            return;
+        }
+        if node_id == BOT || node_id == UNIT {
+            return;
+        }
+        let node = self.get_node(node_id);
+        self.dfs(node.hi, visited);
+        self.dfs(node.lo, visited);
+    }
+    fn universe_size(&self, node_id: NodeId, cache: &mut HashMap<NodeId, usize>) -> usize {
+        if node_id == BOT {
+            return 0;
+        }
+
+        if node_id == UNIT {
+            return 1;
+        }
+
+        if let Some(cached) = cache.get(&node_id) {
+            return *cached;
+        }
+        let node = self.get_node(node_id);
+        let lo_cost = self.universe_size(node.lo, cache);
+        let hi_cost = self.universe_size(node.hi, cache);
+        let res = lo_cost.saturating_add(hi_cost);
+        cache.insert(node_id, res);
+        res
+    }
 }
 
 pub struct Zdd<T> {
@@ -300,6 +339,19 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
     pub fn pool(&self) -> &ZddPool<T> {
         &self.pool
     }
+
+    pub fn report(&self) -> Report {
+        let mut visited = HashSet::default();
+        self.pool.0.borrow().dfs(self.root, &mut visited);
+        let mut counts = HashMap::default();
+        let universe_size = self.pool.0.borrow().universe_size(self.root, &mut counts);
+        Report {
+            zdd_size: visited.len(),
+            universe_size,
+            pool_size: self.pool.0.borrow().nodes.len(),
+        }
+    }
+
     pub fn with_pool(pool: ZddPool<T>) -> Zdd<T> {
         Zdd::new(pool, BOT)
     }
@@ -380,6 +432,25 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
             .0
             .borrow()
             .for_each(&mut vec![], self.root, &mut f)
+    }
+}
+
+/// Debug information about the size of the ZDD in memory.
+#[derive(Default)]
+pub struct Report {
+    pub zdd_size: usize,
+    pub pool_size: usize,
+    pub universe_size: usize,
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "root ZDD has size of {} nodes, representing {} sets",
+            self.zdd_size, self.universe_size
+        )?;
+        writeln!(f, "total ZDD pool has contains {} nodes", self.pool_size)
     }
 }
 

@@ -119,7 +119,7 @@ fn extract_tiny_egraph() {
         classes: vec![vec![0]],
     };
 
-    let (nodes, cost) = choose_nodes(&mut egraph, 0).expect("extractio should succeed");
+    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extractio should succeed");
     assert_eq!(cost, 1);
     assert_eq!(nodes, vec![0]);
 }
@@ -150,7 +150,7 @@ fn extract_sharing() {
             (vec![], 1),
         ],
     };
-    let (nodes, cost) = choose_nodes(&mut egraph, 0).expect("extraction should succeed");
+    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extraction should succeed");
     assert_eq!(nodes, vec![0, 3, 1]);
     assert_eq!(cost, 6);
 }

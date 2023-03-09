@@ -9,7 +9,7 @@ use std::{
 use hashbrown::{hash_map::Entry, HashMap};
 use indexmap::IndexSet;
 
-use crate::{Zdd, ZddPool};
+use crate::{zdd::Report, Zdd, ZddPool};
 
 /// The `Egraph` trait encapsulates the core information required from an Egraph
 /// to encode the extraction problem.
@@ -32,6 +32,7 @@ pub trait Egraph {
 pub fn choose_nodes<E: Egraph>(
     egraph: &mut E,
     root: E::EClassId,
+    report: Option<&mut Report>,
 ) -> Option<(Vec<E::ENodeId>, usize)> {
     let extractor = Extractor::new(root, egraph);
     let (zdd_nodes, cost) = extractor.zdd.min_cost_set(|zdd_node| {
@@ -53,6 +54,9 @@ pub fn choose_nodes<E: Egraph>(
             return None;
         }
         res.push(extractor.node_mapping.get_index(node.0).unwrap().clone());
+    }
+    if let Some(report) = report {
+        *report = extractor.zdd.report();
     }
     Some((res, cost))
 }
@@ -84,7 +88,7 @@ impl<E: Egraph> Extractor<E> {
     pub(crate) fn new(root: E::EClassId, egraph: &mut E) -> Extractor<E> {
         let mut visited = HashMap::default();
         let node_mapping = IndexSet::default();
-        let pool = ZddPool::with_cache_size(1 << 20);
+        let pool = ZddPool::with_cache_size(1 << 25);
         let zdd = Zdd::with_pool(pool.clone());
         let cycle = Zdd::singleton(pool, INFINITY);
         let bot = zdd.clone();

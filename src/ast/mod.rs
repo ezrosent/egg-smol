@@ -91,6 +91,7 @@ pub enum NCommand {
     },
     ExtractZdd {
         var: Symbol,
+        cost_only: bool,
     },
     Check(Vec<NormFact>),
     Print(Symbol, usize),
@@ -144,7 +145,10 @@ impl NCommand {
                 variants: *variants,
                 e: Expr::Var(*var),
             },
-            NCommand::ExtractZdd { var } => Command::ExtractZdd { e: Expr::Var(*var) },
+            NCommand::ExtractZdd { var, cost_only } => Command::ExtractZdd {
+                e: Expr::Var(*var),
+                cost_only: *cost_only,
+            },
             NCommand::Check(facts) => {
                 Command::Check(facts.iter().map(|fact| fact.to_fact()).collect())
             }
@@ -190,7 +194,10 @@ impl NCommand {
                 variants: *variants,
                 var: *var,
             },
-            NCommand::ExtractZdd { var } => NCommand::ExtractZdd { var: *var },
+            NCommand::ExtractZdd { var, cost_only } => NCommand::ExtractZdd {
+                var: *var,
+                cost_only: *cost_only,
+            },
             NCommand::Check(facts) => {
                 NCommand::Check(facts.iter().map(|fact| fact.map_exprs(f)).collect())
             }
@@ -321,6 +328,7 @@ pub enum Command {
     },
     ExtractZdd {
         e: Expr,
+        cost_only: bool,
     },
     // TODO: this could just become an empty query
     Check(Vec<Fact>),
@@ -421,8 +429,12 @@ impl Command {
                 Sexp::String(variants.to_string()),
                 e.to_sexp(),
             ]),
-            Command::ExtractZdd { e } => {
-                Sexp::List(vec![Sexp::String("extract-zdd".into()), e.to_sexp()])
+            Command::ExtractZdd { e, cost_only } => {
+                if *cost_only {
+                    Sexp::List(vec![Sexp::String("extract-zdd-cost".into()), e.to_sexp()])
+                } else {
+                    Sexp::List(vec![Sexp::String("extract-zdd".into()), e.to_sexp()])
+                }
             }
             Command::Check(facts) => Sexp::List(
                 vec![Sexp::String("check".into())]

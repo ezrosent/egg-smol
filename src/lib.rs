@@ -816,12 +816,17 @@ impl EGraph {
                 }
             }
 
-            NCommand::ExtractZdd { var } => {
+            NCommand::ExtractZdd { var, cost_only } => {
                 let expr = Expr::Var(var);
                 if should_run {
-                    // TODO typecheck
-                    let (cost, expr) = self.extract_zdd(expr)?;
-                    format!("Extracted (ZDD) with cost {cost}: {expr}")
+                    if cost_only {
+                        let (cost, report) = self.extract_zdd_cost(expr)?;
+                        format!("Optimal expression cost {cost}:\n{report}")
+                    } else {
+                        // TODO typecheck
+                        let (cost, expr) = self.extract_zdd(expr)?;
+                        format!("Extracted (ZDD) with cost {cost}: {expr}")
+                    }
                 } else {
                     "Skipping ZDD extraction.".into()
                 }
@@ -1000,6 +1005,14 @@ impl EGraph {
         let (_t, value) = self.eval_expr(&e, None, true)?;
         if let Some((cost, expr)) = self.optimal_expr(value) {
             Ok((cost, expr))
+        } else {
+            Err(Error::UnableToGroundZdd)
+        }
+    }
+    pub fn extract_zdd_cost(&mut self, e: Expr) -> Result<(usize, zdds::Report), Error> {
+        let (_t, value) = self.eval_expr(&e, None, true)?;
+        if let Some((cost, report)) = self.optimal_cost(value) {
+            Ok((cost, report))
         } else {
             Err(Error::UnableToGroundZdd)
         }

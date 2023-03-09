@@ -36,9 +36,18 @@ impl EGraph {
     /// id reachable from the given value.
     pub fn optimal_expr(&self, v: Value) -> Option<(Cost, Expr)> {
         let mut extractor = Extractor::new(self);
-        let (nodes, cost) = zdds::choose_nodes(&mut extractor, v)?;
+        let (nodes, cost) = zdds::choose_nodes(&mut extractor, v, None)?;
         extractor.process_best(&nodes);
         Some((cost, extractor.extract_best(&v)))
+    }
+
+    /// Compute the lowest cost extraction for the value without reconstructing
+    /// the whole expression.
+    pub fn optimal_cost(&self, v: Value) -> Option<(Cost, zdds::Report)> {
+        let mut extractor = Extractor::new(self);
+        let mut report = zdds::Report::default();
+        let (_, cost) = zdds::choose_nodes(&mut extractor, v, Some(&mut report))?;
+        Some((cost, report))
     }
 }
 
