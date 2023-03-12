@@ -56,10 +56,15 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         }
     }
 
+    /// The ratio of cache hits to the total number of calls to `get`.
     pub(crate) fn hit_ratio(&self) -> f64 {
         self.hits as f64 / (self.hits + self.misses) as f64
     }
 
+    /// The number of slots currently populated in memory.
+    ///
+    /// The table can grow to the maximum capacity provided in `new`, but it
+    /// only allocates that space lazily.
     pub(crate) fn capacity(&self) -> usize {
         self.table.len()
     }
