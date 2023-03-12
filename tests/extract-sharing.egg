@@ -1,0 +1,80 @@
+(sort X)
+
+(function S (X X) X :cost 1)
+(function T (X) X :cost 2)
+(function Leaf (i64) X :cost 1)
+(function Root (X) X :cost 1)
+
+(define r0 (Leaf 0))
+(define r1 (Leaf 1))
+(define r2 (Leaf 2))
+(define r3 (Leaf 3))
+
+(define s0a (S r0 r1))
+(define s0b (S r1 r0))
+(define t0a (T r2))
+(define t0b (T r3))
+(union s0a s0b)
+(union t0a t0b)
+
+(define s1a (S s0a r0))
+(define s1b (S t0a r1))
+(define t1a (T s0a))
+(define t1b (T t0a))
+(union s1a s1b)
+(union t1a t1b)
+
+(define s2a (S s1a t0a))
+(define s2b (S t1a s0a))
+(define t2a (T s1a))
+(define t2b (T t1a))
+(union s2a s2b)
+(union t2a t2b)
+
+(define s3a (S s2a t1a))
+(define s3b (S t2a s1a))
+(define t3a (T s2a))
+(define t3b (T t2a))
+(union s3a s3b)
+(union t3a t3b)
+
+(define s4a (S s3a t2a))
+(define s4b (S t3a s2a))
+(define t4a (T s3a))
+(define t4b (T t3a))
+(union s4a s4b)
+(union t4a t4b)
+
+(define s5a (S s4a t3a))
+(define s5b (S t4a s3a))
+(define t5a (T s4a))
+(define t5b (T t4a))
+(union s5a s5b)
+(union t5a t5b)
+
+(define s6a (S s5a t4a))
+(define s6b (S t5a s4a))
+(define t6a (T s5a))
+(define t6b (T t5a))
+(union s6a s6b)
+(union t6a t6b)
+
+(define s7a (S s6a t5a))
+(define s7b (S t6a s5a))
+(define t7a (T s6a))
+(define t7b (T t6a))
+(union s7a s7b)
+(union t7a t7b)
+
+(define sna s6a)
+(define tna t6a)
+
+(define rs (Root sna))
+(define rt (Root tna))
+(union rs rt)
+
+(run 1)
+
+(extract rs)
+(extract-zdd-cost rs)
+

@@ -1,0 +1,18 @@
+(sort X)
+(function Leaf (i64) X :cost 1)
+(function Node (X X) X :cost 2)
+
+(define l0 (Leaf 0))
+(define l1 (Leaf 1))
+(define l2 (Leaf 2))
+(define l3 (Leaf 3))
+
+(define m1 (Node l0 l1))
+(define m2 (Node l2 l3))
+(define m3 (Node m1 m2))
+(define root (Node m2 (Node m3 m3)))
+(run 1)
+
+(extract root)
+(extract-zdd root)
+(extract-zdd-cost root)
