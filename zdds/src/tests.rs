@@ -1,4 +1,6 @@
-use crate::{choose_nodes, Egraph, Zdd, ZddPool};
+use petgraph::dot::Dot;
+
+use crate::{choose_nodes, extract_greedy, Egraph, Zdd, ZddPool};
 
 #[test]
 fn basic_merge() {
@@ -101,6 +103,9 @@ struct FakeEgraph {
 impl Egraph for FakeEgraph {
     type EClassId = usize;
     type ENodeId = usize;
+    fn print_node(&mut self, node: &usize) -> String {
+        format!("{node}")
+    }
     fn cost(&self, node: &usize) -> usize {
         self.nodes[*node].1
     }
@@ -119,14 +124,53 @@ fn extract_tiny_egraph() {
         classes: vec![vec![0]],
     };
 
-    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extractio should succeed");
+    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extraction should succeed");
     assert_eq!(cost, 1);
     assert_eq!(nodes, vec![0]);
 }
 
 #[test]
-fn extract_sharing() {
+fn extract_tiny_egraph_greedy() {
     let mut egraph = FakeEgraph {
+        nodes: vec![(vec![], 1)],
+        classes: vec![vec![0]],
+    };
+
+    let result = extract_greedy(&mut egraph, 0).expect("extraction should succeed");
+    assert_eq!(result.total_cost, 1);
+    assert_eq!(result.dag.node_count(), 1);
+}
+
+#[test]
+fn extract_sharing() {
+    let mut egraph = egraph_sharing();
+    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extraction should succeed");
+    assert_eq!(nodes, vec![0, 3, 1]);
+    assert_eq!(cost, 6);
+}
+
+#[test]
+fn extract_sharing_greedy() {
+    let mut egraph = egraph_sharing();
+    let result = extract_greedy(&mut egraph, 0).expect("extraction should succeed");
+    assert_eq!(result.dag.node_count(), 4);
+    assert_eq!(result.total_cost, 7);
+    // TODO: why does it do this? Isn't it supposed to find the wrong one?
+    const EXPECTED: &str = r#"digraph {
+    0 [ label = "0" ]
+    1 [ label = "3" ]
+    2 [ label = "4" ]
+    3 [ label = "2" ]
+    0 -> 1 [ label = "()" ]
+    0 -> 3 [ label = "()" ]
+    3 -> 2 [ label = "()" ]
+}
+"#;
+    assert_eq!(format!("{:?}", Dot::new(&result.dag)), EXPECTED);
+}
+
+fn egraph_sharing() -> FakeEgraph {
+    FakeEgraph {
         classes: vec![
             // R
             vec![0],
@@ -149,8 +193,5 @@ fn extract_sharing() {
             // e
             (vec![], 1),
         ],
-    };
-    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extraction should succeed");
-    assert_eq!(nodes, vec![0, 3, 1]);
-    assert_eq!(cost, 6);
+    }
 }

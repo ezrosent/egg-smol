@@ -1,15 +1,44 @@
 //! An abstraction for Egraphs and a ZDD-based extraction algorithm.
 use std::{
     cell::RefCell,
-    hash::Hash,
+    fmt,
+    hash::{BuildHasherDefault, Hash},
     mem::ManuallyDrop,
     ops::{Deref, DerefMut},
 };
 
 use hashbrown::{hash_map::Entry, HashMap};
 use indexmap::IndexSet;
+use petgraph::{prelude::NodeIndex, Directed, Graph};
+use rustc_hash::FxHasher;
 
 use crate::{zdd::Report, Zdd, ZddPool};
+
+// Some TODOs:
+// 1. return a graph not a set from choose_nodes [in progress: need to migrate zdd]
+// 2. dynamically-sized cache (and measure CHR)
+// 3. garbage collection
+// 4. decomposition (based on zdd node limit? Do we need to count unique nodes
+//    in subgraph? How do we do that? Every GC Pass? (based on pool size, GC.
+//    Based on pool size post-GC, split? Do new splits just use a new pool? That
+//    might be easiest. But keep in mind we want to do sharing as well when extracting.
+//    That should be doable with hash-consing for the graph though, so long as edges ar ordered?)
+// 5. Greedy algorithm (for benchmarking) [done]
+
+/// The type used to return DAGs of expressions during extraction.
+///
+/// This is just a type alias for the underlying petgraph type, which is a
+/// general graph rather than an acylic one.
+
+pub type Dag<T> = Graph<T, (), Directed>;
+
+/// The output "term" returned by an extaction procedure, represented as a
+/// graph.
+pub struct ExtractResult<T> {
+    pub root: NodeIndex,
+    pub dag: Dag<T>,
+    pub total_cost: usize,
+}
 
 /// The `Egraph` trait encapsulates the core information required from an Egraph
 /// to encode the extraction problem.
@@ -18,6 +47,11 @@ pub trait Egraph {
     type ENodeId: Eq + Clone + Hash;
     // Instead of returning into a vector, it'd be nice to return impl
     // Iterator<...>, but that is not stable yet.
+
+    /// Optional printing routine: just for debugging purposes.
+    fn print_node(&mut self, _node: &Self::ENodeId) -> String {
+        Default::default()
+    }
 
     /// For a given EClass, push all of its component ENodes into the `nodes` vector.
     fn expand_class(&mut self, class: &Self::EClassId, nodes: &mut Vec<Self::ENodeId>);
@@ -56,13 +90,45 @@ pub fn choose_nodes<E: Egraph>(
         res.push(extractor.node_mapping.get_index(node.0).unwrap().clone());
     }
     if let Some(report) = report {
+        const PRINT_META: bool = false;
+        if PRINT_META {
+            struct DisplayString(String);
+            impl fmt::Debug for DisplayString {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(f, "{}", self.0)
+                }
+            }
+            extractor.zdd.for_each(|xs| {
+                let to_print = Vec::from_iter(xs.iter().map(|x| {
+                    DisplayString(if *x == INFINITY {
+                        String::from("infinity")
+                    } else {
+                        egraph.print_node(extractor.node_mapping.get_index(x.0).unwrap())
+                    })
+                }));
+                eprintln!("{to_print:#?}");
+            });
+        }
         *report = extractor.zdd.report();
     }
     Some((res, cost))
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+// #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct ZddNode(usize);
+
+// impl PartialOrd for ZddNode {
+//     fn partial_cmp(&self, other: &ZddNode) -> Option<std::cmp::Ordering> {
+//         other.0.partial_cmp(&self.0)
+//     }
+// }
+//
+// impl Ord for ZddNode {
+//     fn cmp(&self, other: &ZddNode) -> std::cmp::Ordering {
+//         other.0.cmp(&self.0)
+//     }
+// }
 
 const INFINITY: ZddNode = ZddNode(usize::MAX);
 
@@ -77,7 +143,7 @@ pub(crate) struct Extractor<E: Egraph> {
     /// Assigns each e-node to its offset in the IndexSet. We want to assign our
     /// own offsets because (heuristically) nodes given a topological order will
     /// compress better in the ZDD.
-    node_mapping: IndexSet<E::ENodeId>,
+    node_mapping: IndexSet<E::ENodeId, BuildHasherDefault<FxHasher>>,
     /// The ZDD encoding all the possible choices of ENode.
     zdd: Zdd<ZddNode>,
     cycle: Zdd<ZddNode>,
@@ -165,7 +231,7 @@ impl<E: Egraph> Extractor<E> {
     }
 }
 
-struct Pool<E: Egraph> {
+pub(crate) struct Pool<E: Egraph> {
     classes: RefCell<Vec<Vec<E::EClassId>>>,
     nodes: RefCell<Vec<Vec<E::ENodeId>>>,
     zdds: RefCell<Vec<Vec<Zdd<ZddNode>>>>,
@@ -182,14 +248,14 @@ impl<E: Egraph> Default for Pool<E> {
 }
 
 impl<E: Egraph> Pool<E> {
-    fn class_vec(&self) -> PoolRef<Vec<E::EClassId>> {
+    pub(crate) fn class_vec(&self) -> PoolRef<Vec<E::EClassId>> {
         let res = self.classes.borrow_mut().pop().unwrap_or_default();
         PoolRef {
             elt: ManuallyDrop::new(res),
             pool: &self.classes,
         }
     }
-    fn node_vec(&self) -> PoolRef<Vec<E::ENodeId>> {
+    pub(crate) fn node_vec(&self) -> PoolRef<Vec<E::ENodeId>> {
         let res = self.nodes.borrow_mut().pop().unwrap_or_default();
         PoolRef {
             elt: ManuallyDrop::new(res),
@@ -205,7 +271,7 @@ impl<E: Egraph> Pool<E> {
     }
 }
 
-trait Clearable {
+pub(crate) trait Clearable {
     fn clear(&mut self);
 }
 
@@ -215,7 +281,7 @@ impl<T> Clearable for Vec<T> {
     }
 }
 
-struct PoolRef<'a, T: Clearable> {
+pub(crate) struct PoolRef<'a, T: Clearable> {
     elt: ManuallyDrop<T>,
     pool: &'a RefCell<Vec<T>>,
 }

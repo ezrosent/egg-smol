@@ -8,12 +8,9 @@ use std::{
     rc::Rc,
 };
 
-use crate::fixed_cache::Cache;
+use crate::{fixed_cache::Cache, HashMap, HashSet};
 use indexmap::IndexSet;
 use rustc_hash::FxHasher;
-
-type HashMap<K, V> = hashbrown::HashMap<K, V, BuildHasherDefault<FxHasher>>;
-type HashSet<T> = hashbrown::HashSet<T, BuildHasherDefault<FxHasher>>;
 
 /// A shared pool of nodes and caches used to speed up ZDD operations. Clones of
 /// a pool yield a handle to the same underlying collection of nodes: Zdds can
