@@ -344,6 +344,8 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
         let universe_size = self.pool.0.borrow().universe_size(self.root, &mut counts);
         Report {
             zdd_size: visited.len(),
+            cache_hit_ratio: self.pool.0.borrow().cache.hit_ratio(),
+            cache_capacity: self.pool.0.borrow().cache.capacity(),
             universe_size,
             pool_size: self.pool.0.borrow().nodes.len(),
         }
@@ -438,6 +440,8 @@ pub struct Report {
     pub zdd_size: usize,
     pub pool_size: usize,
     pub universe_size: usize,
+    pub cache_hit_ratio: f64,
+    pub cache_capacity: usize,
 }
 
 impl fmt::Display for Report {
@@ -447,7 +451,12 @@ impl fmt::Display for Report {
             "root ZDD has size of {} nodes, representing {} sets",
             self.zdd_size, self.universe_size
         )?;
-        writeln!(f, "total ZDD pool has contains {} nodes", self.pool_size)
+        writeln!(f, "total ZDD pool has contains {} nodes", self.pool_size)?;
+        writeln!(
+            f,
+            "ZDD operation cache capacity is {} slots, with a hit ratio of {}",
+            self.cache_capacity, self.cache_hit_ratio
+        )
     }
 }
 

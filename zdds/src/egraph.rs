@@ -115,20 +115,7 @@ pub fn choose_nodes<E: Egraph>(
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-// #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct ZddNode(usize);
-
-// impl PartialOrd for ZddNode {
-//     fn partial_cmp(&self, other: &ZddNode) -> Option<std::cmp::Ordering> {
-//         other.0.partial_cmp(&self.0)
-//     }
-// }
-//
-// impl Ord for ZddNode {
-//     fn cmp(&self, other: &ZddNode) -> std::cmp::Ordering {
-//         other.0.cmp(&self.0)
-//     }
-// }
 
 const INFINITY: ZddNode = ZddNode(usize::MAX);
 

@@ -56,6 +56,14 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         }
     }
 
+    pub(crate) fn hit_ratio(&self) -> f64 {
+        self.hits as f64 / (self.hits + self.misses) as f64
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.table.len()
+    }
+
     /// Get a cached value, if one is present.
     pub(crate) fn get(&mut self, k: &K) -> Option<&V> {
         let (candidate, v) = if let Some(x) = self.table[self.get_index(k)].as_ref() {
