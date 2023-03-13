@@ -2,9 +2,10 @@
 //! limited subset of operations.
 use std::{
     cell::RefCell,
-    cmp::Ordering,
+    cmp::{self, Ordering},
     fmt,
-    hash::{BuildHasherDefault, Hash},
+    hash::{BuildHasher, BuildHasherDefault, Hash},
+    mem,
     rc::Rc,
 };
 
@@ -38,7 +39,9 @@ impl<T: Eq + Hash + Ord + Clone> ZddPool<T> {
 }
 
 pub(crate) struct ZddPoolRep<T> {
+    scratch: IndexSet<Node<T>, BuildHasherDefault<FxHasher>>,
     nodes: IndexSet<Node<T>, BuildHasherDefault<FxHasher>>,
+    gc_at: usize,
     cache: Cache<(NodeId, NodeId, Operation), NodeId>,
 }
 
@@ -46,6 +49,8 @@ impl<T> ZddPoolRep<T> {
     pub(crate) fn with_cache_size(cache_size: usize) -> ZddPoolRep<T> {
         ZddPoolRep {
             nodes: Default::default(),
+            scratch: Default::default(),
+            gc_at: 1 << 12,
             cache: Cache::new(cache_size),
         }
     }
@@ -56,14 +61,67 @@ impl<T> ZddPoolRep<T> {
     }
 }
 
+fn make_node_with_set<T: Eq + Hash>(
+    item: T,
+    lo: NodeId,
+    hi: NodeId,
+    nodes: &mut IndexSet<Node<T>, impl BuildHasher>,
+) -> NodeId {
+    let node = Node { item, lo, hi };
+    if let Some(id) = nodes.get_index_of(&node) {
+        return NodeId::new(id);
+    }
+    let (res, _) = nodes.insert_full(node);
+    NodeId::new(res)
+}
+
 impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
     pub(crate) fn make_node(&mut self, item: T, lo: NodeId, hi: NodeId) -> NodeId {
-        let node = Node { item, lo, hi };
-        if let Some(id) = self.nodes.get_index_of(&node) {
-            return NodeId::new(id);
+        make_node_with_set(item, lo, hi, &mut self.nodes)
+    }
+
+    pub(crate) fn should_gc(&self) -> bool {
+        self.nodes.len() >= self.gc_at
+    }
+
+    fn gc(&mut self, roots: impl IntoIterator<Item = NodeId>) -> HashMap<NodeId, NodeId> {
+        let mut mapping = HashMap::default();
+        for root in roots {
+            self.gc_traverse(root, &mut mapping);
         }
-        let (res, _) = self.nodes.insert_full(node);
-        NodeId::new(res)
+        self.nodes.clear();
+        mem::swap(&mut self.nodes, &mut self.scratch);
+        self.cache
+            .remap(|(l, r, _), _| match (mapping.get(l), mapping.get(r)) {
+                (Some(x), Some(y)) => {
+                    *l = *x;
+                    *r = *y;
+                    true
+                }
+                _ => false,
+            });
+        self.gc_at = cmp::max(16, self.nodes.len() * 2);
+        mapping
+    }
+
+    fn gc_traverse(&mut self, node_id: NodeId, mapping: &mut HashMap<NodeId, NodeId>) -> NodeId {
+        if node_id == BOT || node_id == UNIT {
+            return node_id;
+        }
+        if let Some(res) = mapping.get(&node_id) {
+            return *res;
+        }
+
+        // NB: we clone the live contents of the pool. We could avoid this with
+        // a bit more work if we ever get a case for elements that hard to
+        // clone.
+
+        let Node { item, lo, hi } = self.get_node(node_id).clone();
+        let new_hi = self.gc_traverse(hi, mapping);
+        let new_lo = self.gc_traverse(lo, mapping);
+        let res = make_node_with_set(item, new_lo, new_hi, &mut self.scratch);
+        mapping.insert(node_id, res);
+        res
     }
 
     fn min_cost_set(
@@ -318,6 +376,34 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
     }
 }
 
+/// Run a GC pass on the underlying Zdd pool, preserving any nodes referenced by
+/// the given Zdds.
+///
+/// * It is recommended to only call this function after confirming that
+/// `should_gc` returns true. This allows the cost of repeated garbage
+/// collection passes to be amortized across a large number of incremental
+/// operations.
+///
+/// * All Zdds in `zdds` must reference the same underlying pool.
+pub fn gc_zdds<'a, T>(zdds: &mut [&mut Zdd<T>])
+where
+    T: Eq + Ord + Hash + Clone + 'a,
+{
+    if zdds.is_empty() {
+        return;
+    }
+    assert!(zdds[1..]
+        .iter()
+        .all(|x| Rc::ptr_eq(&x.pool.0, &zdds[0].pool.0)));
+
+    let pool = zdds[0].pool().clone();
+
+    let mapping = pool.0.borrow_mut().gc(zdds.iter().map(|x| x.root));
+    for zdd in zdds {
+        zdd.root = mapping[&zdd.root]
+    }
+}
+
 pub struct Zdd<T> {
     pool: ZddPool<T>,
     root: NodeId,
@@ -354,6 +440,15 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
     pub fn with_pool(pool: ZddPool<T>) -> Zdd<T> {
         Zdd::new(pool, BOT)
     }
+
+    /// Whether or not the underlying ZDD pool could use a GC pass.
+    ///
+    /// The heuristic here only looks for growth of the underlying pool since
+    /// the last GC pass.
+    pub fn should_gc(&self) -> bool {
+        self.pool.0.borrow().should_gc()
+    }
+
     pub fn singleton(pool: ZddPool<T>, item: T) -> Zdd<T> {
         let node = pool.make_node(item, BOT, UNIT);
         Zdd::new(pool, node)
@@ -485,6 +580,21 @@ struct Node<T> {
     hi: NodeId,
     lo: NodeId,
 }
+
+// TODO: replace item: T with item Either<T, NodeId>. Metanodes compare _larger_
+// than any t (and then compare numerically).
+// Replace a node with a metanode singleton during "GC" if its transitive size
+// is large enough.
+// During traversal (i.e. DAG construction) ... well we still need to figure
+// that bit out.
+// * We can compute a min-cost set. But now we may not have a mapping
+// eclass => enode. During traversal we need to resolve conflicts, perhaps using
+// greedy? That may not be sufficient though... Basically we need to build all
+// sub-dags, but I think this is still a variant of the greedy algorithm. We
+// essentially are using the ZDDs as a filter for which e-nodes are relevant in
+// each class, then doing a greedy optimization from there.
+//
+// There's probably a way to share code with greedy here... just pass a filter.
 
 /// A particular operation performed on a ZDD.
 #[derive(PartialEq, Eq, Hash)]

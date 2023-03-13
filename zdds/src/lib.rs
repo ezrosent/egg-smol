@@ -11,7 +11,7 @@ mod tests;
 
 pub use egraph::{choose_nodes, Dag, Egraph};
 pub use greedy_extract::extract_greedy;
-pub use zdd::{Report, Zdd, ZddPool};
+pub use zdd::{gc_zdds, Report, Zdd, ZddPool};
 
 use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;

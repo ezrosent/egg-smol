@@ -33,6 +33,23 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         }
     }
 
+    /// Take the current entries in the cache and rewrite them according to `f`
+    /// in place. If the function returns 'false' then the item should be
+    /// removed.
+    pub(crate) fn remap(&mut self, mut f: impl FnMut(&mut K, &mut V) -> bool) {
+        for i in 0..self.table.len() {
+            let slot = &mut self.table[i];
+            if slot.is_none() {
+                continue;
+            }
+            let (mut k, mut v) = slot.take().unwrap();
+            self.populated -= 1;
+            if f(&mut k, &mut v) {
+                self.set(k, v)
+            }
+        }
+    }
+
     fn get_index(&self, k: &K) -> usize {
         let mut hasher = FxHasher::default();
         k.hash(&mut hasher);

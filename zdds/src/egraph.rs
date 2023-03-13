@@ -16,13 +16,29 @@ use crate::{zdd::Report, Zdd, ZddPool};
 
 // Some TODOs:
 // 1. return a graph not a set from choose_nodes [in progress: need to migrate zdd]
-// 2. dynamically-sized cache (and measure CHR)
-// 3. garbage collection
-// 4. decomposition (based on zdd node limit? Do we need to count unique nodes
-//    in subgraph? How do we do that? Every GC Pass? (based on pool size, GC.
-//    Based on pool size post-GC, split? Do new splits just use a new pool? That
-//    might be easiest. But keep in mind we want to do sharing as well when extracting.
-//    That should be doable with hash-consing for the graph though, so long as edges ar ordered?)
+// 2. dynamically-sized cache (and measure CHR) [done]
+// 3. garbage collection  [done-ish]
+//    * build "public" API that routes through Zdd type. Remaps any Zdds passed
+//    in as roots.
+//    * can do this when 'should_gc' which can also be public.
+// 4. decomposition through GC:
+//    * Once GC is in place, we can modify the traversal to keep track of transitive cost.
+//    * once transitive cost exceeds a threshold, replace with  "metanode" which
+//    has transitive cost of size 1.
+//    * this way, other nodes can still hit "below" the metanode; they can get
+//    frozen too, but we ultimately still have a good amount of sharing.
+//    * This leaves us open to "generational" setups: metanodes can be 'inert'
+//    blobs that live at the front of the vector. But for now, amoritzation
+//    should mean that we can leave this as a "bonus;" it also shores up the
+//    justification for GC: it makes exponential growth ~impossible; it doesn't
+//    just improve the constants.
+//
+//    We may want to start with "just" decomposition for now...  GC works, but
+//    we don't have a great way to compute root sets. We can trigger a GC far
+//    down the stack, invalidating local variables. We could add those locals to
+//    the root set, or we could GC suffixes of the pool. Suffixes would be
+//    easier, but copying could get expensive.
+//
 // 5. Greedy algorithm (for benchmarking) [done]
 
 /// The type used to return DAGs of expressions during extraction.
