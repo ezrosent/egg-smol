@@ -21,24 +21,16 @@ use crate::{zdd::Report, Zdd, ZddPool};
 //    * build "public" API that routes through Zdd type. Remaps any Zdds passed
 //    in as roots.
 //    * can do this when 'should_gc' which can also be public.
-// 4. decomposition through GC:
-//    * Once GC is in place, we can modify the traversal to keep track of transitive cost.
-//    * once transitive cost exceeds a threshold, replace with  "metanode" which
-//    has transitive cost of size 1.
-//    * this way, other nodes can still hit "below" the metanode; they can get
-//    frozen too, but we ultimately still have a good amount of sharing.
-//    * This leaves us open to "generational" setups: metanodes can be 'inert'
-//    blobs that live at the front of the vector. But for now, amoritzation
-//    should mean that we can leave this as a "bonus;" it also shores up the
-//    justification for GC: it makes exponential growth ~impossible; it doesn't
-//    just improve the constants.
-//
-//    We may want to start with "just" decomposition for now...  GC works, but
-//    we don't have a great way to compute root sets. We can trigger a GC far
-//    down the stack, invalidating local variables. We could add those locals to
-//    the root set, or we could GC suffixes of the pool. Suffixes would be
-//    easier, but copying could get expensive.
-//
+//    * We need to do "suffix GC": can be pretty fast because old nodes point to
+//    new nodes. (but think about the invariants carefully; not all variables on the stack are 'new')
+// 4. decomposition
+//    * Wanted to do it during GC, but it's actually quite troublesome to
+//    compute DAG size for all nodes at once: you need to store a set at each
+//    node to avoid double-counting.
+//    * Instead, we'll keep track of pool growth during a call to 'traverse' and
+//    'DFS' if it was large enough. DFS can then confirm the size is above the
+//    node limit and we can call 'freeze' before returning.
+
 // 5. Greedy algorithm (for benchmarking) [done]
 
 /// The type used to return DAGs of expressions during extraction.
@@ -92,7 +84,7 @@ pub fn choose_nodes<E: Egraph>(
             egraph.cost(
                 extractor
                     .node_mapping
-                    .get_index(zdd_node.0)
+                    .get_index(zdd_node.index())
                     .expect("all nodes should be valid"),
             )
         }
@@ -103,7 +95,13 @@ pub fn choose_nodes<E: Egraph>(
         if node == INFINITY {
             return None;
         }
-        res.push(extractor.node_mapping.get_index(node.0).unwrap().clone());
+        res.push(
+            extractor
+                .node_mapping
+                .get_index(node.index())
+                .unwrap()
+                .clone(),
+        );
     }
     if let Some(report) = report {
         const PRINT_META: bool = false;
@@ -119,7 +117,7 @@ pub fn choose_nodes<E: Egraph>(
                     DisplayString(if *x == INFINITY {
                         String::from("infinity")
                     } else {
-                        egraph.print_node(extractor.node_mapping.get_index(x.0).unwrap())
+                        egraph.print_node(extractor.node_mapping.get_index(x.index()).unwrap())
                     })
                 }));
                 eprintln!("{to_print:#?}");
@@ -131,14 +129,18 @@ pub fn choose_nodes<E: Egraph>(
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-struct ZddNode(usize);
+struct ZddNode(u32);
 
-const INFINITY: ZddNode = ZddNode(usize::MAX);
+const INFINITY: ZddNode = ZddNode(u32::MAX);
 
 impl ZddNode {
     fn new(u: usize) -> ZddNode {
-        assert!(u < usize::MAX);
-        ZddNode(u)
+        assert!(u < u32::MAX as usize);
+        ZddNode(u as u32)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
     }
 }
 

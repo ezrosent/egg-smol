@@ -39,8 +39,8 @@ impl<T: Eq + Hash + Ord + Clone> ZddPool<T> {
 }
 
 pub(crate) struct ZddPoolRep<T> {
-    scratch: IndexSet<Node<T>, BuildHasherDefault<FxHasher>>,
-    nodes: IndexSet<Node<T>, BuildHasherDefault<FxHasher>>,
+    scratch: IndexSet<Node<Val<T>>, BuildHasherDefault<FxHasher>>,
+    nodes: IndexSet<Node<Val<T>>, BuildHasherDefault<FxHasher>>,
     gc_at: usize,
     cache: Cache<(NodeId, NodeId, Operation), NodeId>,
 }
@@ -54,7 +54,7 @@ impl<T> ZddPoolRep<T> {
             cache: Cache::new(cache_size),
         }
     }
-    fn get_node(&self, node: NodeId) -> &Node<T> {
+    fn get_node(&self, node: NodeId) -> &Node<Val<T>> {
         debug_assert_ne!(node, UNIT);
         debug_assert_ne!(node, BOT);
         self.nodes.get_index(node.index()).as_ref().unwrap()
@@ -76,7 +76,14 @@ fn make_node_with_set<T: Eq + Hash>(
 }
 
 impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
+    fn frozen(&mut self, node: NodeId) -> NodeId {
+        self.make_val_node(Val::Meta(node), BOT, UNIT)
+    }
     pub(crate) fn make_node(&mut self, item: T, lo: NodeId, hi: NodeId) -> NodeId {
+        self.make_val_node(Val::Base(item), lo, hi)
+    }
+
+    fn make_val_node(&mut self, item: Val<T>, lo: NodeId, hi: NodeId) -> NodeId {
         make_node_with_set(item, lo, hi, &mut self.nodes)
     }
 
@@ -119,7 +126,13 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
         let Node { item, lo, hi } = self.get_node(node_id).clone();
         let new_hi = self.gc_traverse(hi, mapping);
         let new_lo = self.gc_traverse(lo, mapping);
-        let res = make_node_with_set(item, new_lo, new_hi, &mut self.scratch);
+        let res = match &item {
+            Val::Base(_) => make_node_with_set(item, new_lo, new_hi, &mut self.scratch),
+            Val::Meta(n) => {
+                let new_meta = self.gc_traverse(*n, mapping);
+                make_node_with_set(Val::Meta(new_meta), new_lo, new_hi, &mut self.scratch)
+            }
+        };
         mapping.insert(node_id, res);
         res
     }
@@ -146,19 +159,43 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
             let hi_cost = self.min_cost_set(table, memo, cost, rep.hi);
             match (lo_cost, hi_cost) {
                 (None, None) => None,
-                (None, Some((chain, opt))) => Some((
-                    table.cons(rep.item.clone(), chain),
-                    opt.saturating_add(cost(&rep.item)),
-                )),
-                (Some(x), None) => Some(x),
-                (Some((lo_chain, lo_cost)), Some((hi_chain, hi_cost))) => {
-                    let total_hi_cost = hi_cost.saturating_add(cost(&rep.item));
-                    if lo_cost <= total_hi_cost {
-                        Some((lo_chain, lo_cost))
-                    } else {
-                        Some((table.cons(rep.item.clone(), hi_chain), total_hi_cost))
+                (None, Some((chain, opt))) => match &rep.item {
+                    Val::Base(t) => {
+                        Some((table.cons(t.clone(), chain), opt.saturating_add(cost(t))))
                     }
-                }
+                    Val::Meta(n) => {
+                        let (inner_chain, inner_cost) = self.min_cost_set(table, memo, cost, *n)?;
+                        Some((
+                            table.merge(inner_chain, chain),
+                            opt.saturating_add(inner_cost),
+                        ))
+                    }
+                },
+                (Some(x), None) => Some(x),
+                (Some((lo_chain, lo_cost)), Some((hi_chain, hi_cost))) => match &rep.item {
+                    Val::Base(t) => {
+                        let total_hi_cost = hi_cost.saturating_add(cost(t));
+                        if lo_cost <= total_hi_cost {
+                            Some((lo_chain, lo_cost))
+                        } else {
+                            Some((table.cons(t.clone(), hi_chain), total_hi_cost))
+                        }
+                    }
+                    Val::Meta(n) => {
+                        if let Some((inner_chain, inner_cost)) =
+                            self.min_cost_set(table, memo, cost, *n)
+                        {
+                            let total_hi_cost = hi_cost.saturating_add(inner_cost);
+                            if lo_cost <= total_hi_cost {
+                                Some((lo_chain, lo_cost))
+                            } else {
+                                Some((table.merge(inner_chain, hi_chain), total_hi_cost))
+                            }
+                        } else {
+                            Some((lo_chain, lo_cost))
+                        }
+                    }
+                },
             }
         };
         memo.insert(node, res);
@@ -185,7 +222,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
         } else if r == UNIT {
             let l_node = self.get_node(l).clone();
             let lo = self.union_nodes(l_node.lo, UNIT);
-            self.make_node(l_node.item, lo, l_node.hi)
+            self.make_val_node(l_node.item, lo, l_node.hi)
         } else {
             let l_node = self.get_node(l);
             let r_node = self.get_node(r);
@@ -199,7 +236,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
                     let r_lo = r_node.lo;
                     let hi = self.union_nodes(l_hi, r_hi);
                     let lo = self.union_nodes(l_lo, r_lo);
-                    self.make_node(item, lo, hi)
+                    self.make_val_node(item, lo, hi)
                 }
                 Ordering::Less => {
                     // l < r
@@ -208,7 +245,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
                     // merge 'r' with the lo node.
                     let node = l_node.clone();
                     let lo = self.union_nodes(node.lo, r);
-                    self.make_node(node.item, lo, node.hi)
+                    self.make_val_node(node.item, lo, node.hi)
                 }
                 Ordering::Greater => return self.union_nodes(r, l),
             }
@@ -253,7 +290,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
                     hi = self.union_nodes(hi, lo_hi);
 
                     let lo = self.join_nodes(l_lo, r_lo);
-                    self.make_node(item, lo, hi)
+                    self.make_val_node(item, lo, hi)
                 }
                 Ordering::Less => {
                     // merging hi with r will correctly add l to everything there.
@@ -262,7 +299,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
                     let node = l_node.clone();
                     let hi = self.join_nodes(node.hi, r);
                     let lo = self.join_nodes(node.lo, r);
-                    self.make_node(node.item, lo, hi)
+                    self.make_val_node(node.item, lo, hi)
                 }
                 Ordering::Greater => return self.join_nodes(r, l),
             }
@@ -304,7 +341,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
                     let r_lo = r_node.lo;
                     let hi = self.intersect_nodes(l_hi, r_hi);
                     let lo = self.intersect_nodes(l_lo, r_lo);
-                    self.make_node(item, lo, hi)
+                    self.make_val_node(item, lo, hi)
                 }
                 Ordering::Less => {
                     // l < r, so l does not appear in r. Continue by intersecting l.lo with r
@@ -318,19 +355,47 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
         res
     }
 
-    fn for_each(&self, prefix: &mut Vec<T>, node: NodeId, f: &mut impl FnMut(&[T])) {
+    fn for_each(&self, prefix: &mut IndexSet<T>, node: NodeId, f: &mut impl FnMut(&[T])) {
         if node == BOT {
             return;
         }
         if node == UNIT {
-            f(prefix);
+            let elts = Vec::from_iter(prefix.iter().cloned());
+            f(&elts);
             return;
         }
         let node = self.get_node(node).clone();
         self.for_each(prefix, node.lo, f);
-        prefix.push(node.item);
-        self.for_each(prefix, node.hi, f);
-        prefix.pop().unwrap();
+        match &node.item {
+            Val::Base(t) => {
+                if prefix.insert(t.clone()) {
+                    self.for_each(prefix, node.hi, f);
+                    prefix.pop().unwrap();
+                } else {
+                    self.for_each(prefix, node.hi, f);
+                }
+            }
+            Val::Meta(n) => {
+                // This is very inefficient!
+                let start = prefix.len();
+
+                // Use a trait object to limit compiler recursion depth during
+                // monomorphization. Trait objects can't borrow local variables,
+                // hence the Rc<RefCell<...>> business.
+                let prefixes = Rc::new(RefCell::new(Vec::new()));
+                #[allow(clippy::type_complexity)]
+                let mut collect_prefixes: Box<dyn FnMut(&[T])> = Box::new(|elts: &[T]| {
+                    prefixes
+                        .borrow_mut()
+                        .push(IndexSet::from_iter(elts.iter().cloned()));
+                });
+                self.for_each(prefix, *n, &mut collect_prefixes);
+                for prefix in prefixes.borrow_mut().iter_mut() {
+                    self.for_each(prefix, node.hi, f)
+                }
+                prefix.truncate(start)
+            }
+        }
     }
 
     fn merge_sorted_vals(
@@ -516,16 +581,28 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
         self.root = self.pool.0.borrow_mut().join_nodes(self.root, other.root);
     }
 
+    /// Freeze the ZDD.
+    ///
+    /// ZDDs that are frozen are treated as "synthetic elements" in the ZDD.
+    /// Algorithms like `merge` and `join` will not recur under the root node
+    /// for the ZDD. This can greatly increase efficiency of the construction,
+    /// at the cost of losing optimality for many of the cost-minimization
+    /// functions.
+    pub fn freeze(&mut self) {
+        self.root = self.pool.0.borrow_mut().frozen(self.root);
+    }
+
     /// Iterate over the sets represented by the Zdd.
     ///
-    /// This operation should more or less only be used for debugging: `f` can
-    /// be called O(2^n) times for a ZDD of size O(n). As such, this method does
-    /// not aim to be efficient in terms of copies for the underlying data.
+    /// This operation should more or less only be used for debugging or
+    /// testing: `f` can be called O(2^n) times for a ZDD of size O(n). As such,
+    /// this method does not aim to be efficient in terms of copies for the
+    /// underlying data.
     pub fn for_each(&self, mut f: impl FnMut(&[T])) {
         self.pool
             .0
             .borrow()
-            .for_each(&mut vec![], self.root, &mut f)
+            .for_each(&mut Default::default(), self.root, &mut f)
     }
 }
 
@@ -558,7 +635,7 @@ impl fmt::Display for Report {
 pub(crate) const BOT: NodeId = NodeId(!0 - 1);
 pub(crate) const UNIT: NodeId = NodeId(!0);
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, PartialOrd, Ord)]
 pub(crate) struct NodeId(u32);
 
 impl NodeId {
@@ -579,6 +656,34 @@ struct Node<T> {
     item: T,
     hi: NodeId,
     lo: NodeId,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone)]
+enum Val<T> {
+    Base(T),
+    Meta(NodeId),
+}
+
+impl<T: PartialOrd> PartialOrd for Val<T> {
+    fn partial_cmp(&self, other: &Val<T>) -> Option<Ordering> {
+        match (self, other) {
+            (Val::Base(l), Val::Base(r)) => l.partial_cmp(r),
+            (Val::Base(_), Val::Meta(_)) => Some(Ordering::Less),
+            (Val::Meta(_), Val::Base(_)) => Some(Ordering::Greater),
+            (Val::Meta(n1), Val::Meta(n2)) => n1.partial_cmp(n2),
+        }
+    }
+}
+
+impl<T: Ord> Ord for Val<T> {
+    fn cmp(&self, other: &Val<T>) -> Ordering {
+        match (self, other) {
+            (Val::Base(l), Val::Base(r)) => l.cmp(r),
+            (Val::Base(_), Val::Meta(_)) => Ordering::Less,
+            (Val::Meta(_), Val::Base(_)) => Ordering::Greater,
+            (Val::Meta(n1), Val::Meta(n2)) => n1.cmp(n2),
+        }
+    }
 }
 
 // TODO: replace item: T with item Either<T, NodeId>. Metanodes compare _larger_
@@ -616,17 +721,36 @@ struct LinkId(usize);
 
 const NIL: LinkId = LinkId(usize::MAX);
 
-impl<T> BackChainTable<T> {
+impl<T: Hash + Eq> BackChainTable<T> {
     fn cons(&mut self, elt: T, next: LinkId) -> LinkId {
         let res = self.nodes.len();
-        self.nodes.push(Link { elt, next });
+        self.nodes.push(Link::Cons { elt, next });
         LinkId(res)
     }
-    fn for_each(&self, mut link: LinkId, mut f: impl FnMut(&T)) {
-        while link != NIL {
-            let node = &self.nodes[link.0];
-            f(&node.elt);
-            link = node.next;
+    fn merge(&mut self, l: LinkId, r: LinkId) -> LinkId {
+        let res = self.nodes.len();
+        self.nodes.push(Link::Union { l, r });
+        LinkId(res)
+    }
+    fn for_each(&self, link: LinkId, mut f: impl FnMut(&T)) {
+        let mut seen = HashSet::default();
+        let mut deferred = vec![link];
+        while let Some(mut link) = deferred.pop() {
+            while link != NIL {
+                let node = &self.nodes[link.0];
+                match &node {
+                    Link::Cons { elt, next } => {
+                        if seen.insert(elt) {
+                            f(elt);
+                        }
+                        link = *next;
+                    }
+                    Link::Union { l, r } => {
+                        link = *l;
+                        deferred.push(*r);
+                    }
+                }
+            }
         }
     }
 }
@@ -639,7 +763,7 @@ impl<T> Default for BackChainTable<T> {
     }
 }
 
-struct Link<T> {
-    elt: T,
-    next: LinkId,
+enum Link<T> {
+    Cons { elt: T, next: LinkId },
+    Union { l: LinkId, r: LinkId },
 }
