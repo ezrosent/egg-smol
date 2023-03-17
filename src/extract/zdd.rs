@@ -29,6 +29,8 @@ struct Extractor<'a> {
     min_costs: HashMap<Value, ENodeId>,
 }
 
+const ZDD_NODE_LIMIT: Option<usize> = Some(16 << 10);
+
 impl EGraph {
     /// Extract the minimum-cost expression associated with the value.
     ///
@@ -36,7 +38,7 @@ impl EGraph {
     /// id reachable from the given value.
     pub fn optimal_expr(&self, v: Value) -> Option<(Cost, Expr)> {
         let mut extractor = Extractor::new(self);
-        let (nodes, cost) = zdds::choose_nodes(&mut extractor, v, None)?;
+        let (nodes, cost) = zdds::choose_nodes(&mut extractor, v, None, ZDD_NODE_LIMIT)?;
         extractor.process_best(&nodes);
         Some((cost, extractor.extract_best(&v)))
     }
@@ -46,7 +48,7 @@ impl EGraph {
     pub fn optimal_cost(&self, v: Value) -> Option<(Cost, zdds::Report)> {
         let mut extractor = Extractor::new(self);
         let mut report = zdds::Report::default();
-        let (_, cost) = zdds::choose_nodes(&mut extractor, v, Some(&mut report))?;
+        let (_, cost) = zdds::choose_nodes(&mut extractor, v, Some(&mut report), ZDD_NODE_LIMIT)?;
         Some((cost, report))
     }
 }

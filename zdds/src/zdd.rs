@@ -30,6 +30,9 @@ impl<T> ZddPool<T> {
             cache_size,
         ))))
     }
+    pub fn size(&self) -> usize {
+        self.0.borrow().nodes.len()
+    }
 }
 
 impl<T: Eq + Hash + Ord + Clone> ZddPool<T> {
@@ -420,22 +423,34 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
         self.dfs(node.hi, visited);
         self.dfs(node.lo, visited);
     }
-    fn universe_size(&self, node_id: NodeId, cache: &mut HashMap<NodeId, usize>) -> usize {
+    fn universe_size(
+        &self,
+        node_id: NodeId,
+        cache: &mut HashMap<NodeId, (usize, usize)>,
+    ) -> (usize, usize) {
         if node_id == BOT {
-            return 0;
+            return (0, 0);
         }
 
         if node_id == UNIT {
-            return 1;
+            return (1, 1);
         }
 
         if let Some(cached) = cache.get(&node_id) {
             return *cached;
         }
         let node = self.get_node(node_id);
-        let lo_cost = self.universe_size(node.lo, cache);
-        let hi_cost = self.universe_size(node.hi, cache);
-        let res = lo_cost.saturating_add(hi_cost);
+        let (lo_min, lo_max) = self.universe_size(node.lo, cache);
+        let (hi_min, hi_max) = self.universe_size(node.hi, cache);
+        let min = lo_min.saturating_add(hi_min);
+        let res = match &node.item {
+            Val::Base(_) => (min, lo_max.saturating_add(hi_max)),
+            Val::Meta(n) => {
+                let n = *n;
+                let (_, max) = self.universe_size(n, cache);
+                (min, lo_max.saturating_add(hi_max.saturating_mul(max)))
+            }
+        };
         cache.insert(node_id, res);
         res
     }
@@ -489,17 +504,28 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
     }
 
     pub fn report(&self) -> Report {
-        let mut visited = HashSet::default();
-        self.pool.0.borrow().dfs(self.root, &mut visited);
         let mut counts = HashMap::default();
-        let universe_size = self.pool.0.borrow().universe_size(self.root, &mut counts);
+        let (universe_size_min, universe_size_max) =
+            self.pool.0.borrow().universe_size(self.root, &mut counts);
         Report {
-            zdd_size: visited.len(),
+            zdd_size: self.count_nodes(&mut Default::default()),
             cache_hit_ratio: self.pool.0.borrow().cache.hit_ratio(),
             cache_capacity: self.pool.0.borrow().cache.capacity(),
-            universe_size,
-            pool_size: self.pool.0.borrow().nodes.len(),
+            universe_size_min,
+            universe_size_max,
+            pool_size: self.pool.size(),
         }
+    }
+
+    /// Count the number of unique nodes in the Zdd.
+    ///
+    /// This method consumes a set for storing visited nodes. This allows
+    /// repeated calls to `count_nodes` to reuse allocations.
+    pub(crate) fn count_nodes(&self, visited: &mut HashSet<NodeId>) -> usize {
+        self.pool.0.borrow().dfs(self.root, visited);
+        let res = visited.len();
+        visited.clear();
+        res
     }
 
     pub fn with_pool(pool: ZddPool<T>) -> Zdd<T> {
@@ -611,7 +637,8 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
 pub struct Report {
     pub zdd_size: usize,
     pub pool_size: usize,
-    pub universe_size: usize,
+    pub universe_size_min: usize,
+    pub universe_size_max: usize,
     pub cache_hit_ratio: f64,
     pub cache_capacity: usize,
 }
@@ -620,8 +647,8 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "root ZDD has size of {} nodes, representing {} sets",
-            self.zdd_size, self.universe_size
+            "root ZDD has size of {} nodes, representing between {} and {} sets",
+            self.zdd_size, self.universe_size_min, self.universe_size_max
         )?;
         writeln!(f, "total ZDD pool has contains {} nodes", self.pool_size)?;
         writeln!(

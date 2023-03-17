@@ -1,4 +1,5 @@
-//! An abstraction for Egraphs and a ZDD-based extraction algorithm.
+//! An abstraction for Egraphs and utilities for building ZDDs to represent
+//! possible choices of ENodes.
 use std::{
     cell::RefCell,
     fmt,
@@ -9,44 +10,12 @@ use std::{
 
 use hashbrown::{hash_map::Entry, HashMap};
 use indexmap::IndexSet;
-use petgraph::{prelude::NodeIndex, Directed, Graph};
 use rustc_hash::FxHasher;
 
-use crate::{zdd::Report, Zdd, ZddPool};
-
-// Some TODOs:
-// 1. return a graph not a set from choose_nodes [in progress: need to migrate zdd]
-// 2. dynamically-sized cache (and measure CHR) [done]
-// 3. garbage collection  [done-ish]
-//    * build "public" API that routes through Zdd type. Remaps any Zdds passed
-//    in as roots.
-//    * can do this when 'should_gc' which can also be public.
-//    * We need to do "suffix GC": can be pretty fast because old nodes point to
-//    new nodes. (but think about the invariants carefully; not all variables on the stack are 'new')
-// 4. decomposition
-//    * Wanted to do it during GC, but it's actually quite troublesome to
-//    compute DAG size for all nodes at once: you need to store a set at each
-//    node to avoid double-counting.
-//    * Instead, we'll keep track of pool growth during a call to 'traverse' and
-//    'DFS' if it was large enough. DFS can then confirm the size is above the
-//    node limit and we can call 'freeze' before returning.
-
-// 5. Greedy algorithm (for benchmarking) [done]
-
-/// The type used to return DAGs of expressions during extraction.
-///
-/// This is just a type alias for the underlying petgraph type, which is a
-/// general graph rather than an acylic one.
-
-pub type Dag<T> = Graph<T, (), Directed>;
-
-/// The output "term" returned by an extaction procedure, represented as a
-/// graph.
-pub struct ExtractResult<T> {
-    pub root: NodeIndex,
-    pub dag: Dag<T>,
-    pub total_cost: usize,
-}
+use crate::{
+    zdd::{NodeId, Report},
+    HashSet, Zdd, ZddPool,
+};
 
 /// The `Egraph` trait encapsulates the core information required from an Egraph
 /// to encode the extraction problem.
@@ -75,8 +44,9 @@ pub fn choose_nodes<E: Egraph>(
     egraph: &mut E,
     root: E::EClassId,
     report: Option<&mut Report>,
+    node_limit: Option<usize>,
 ) -> Option<(Vec<E::ENodeId>, usize)> {
-    let extractor = Extractor::new(root, egraph);
+    let extractor = Extractor::new(root, egraph, node_limit);
     let (zdd_nodes, cost) = extractor.zdd.min_cost_set(|zdd_node| {
         if *zdd_node == INFINITY {
             usize::MAX
@@ -153,10 +123,16 @@ pub(crate) struct Extractor<E: Egraph> {
     zdd: Zdd<ZddNode>,
     cycle: Zdd<ZddNode>,
     bot: Zdd<ZddNode>,
+    visited_set: HashSet<NodeId>,
+    node_limit: usize,
 }
 
 impl<E: Egraph> Extractor<E> {
-    pub(crate) fn new(root: E::EClassId, egraph: &mut E) -> Extractor<E> {
+    pub(crate) fn new(
+        root: E::EClassId,
+        egraph: &mut E,
+        node_limit: Option<usize>,
+    ) -> Extractor<E> {
         let mut visited = HashMap::default();
         let node_mapping = IndexSet::default();
         let pool = ZddPool::with_cache_size(1 << 25);
@@ -169,6 +145,8 @@ impl<E: Egraph> Extractor<E> {
             zdd,
             cycle,
             bot,
+            visited_set: Default::default(),
+            node_limit: node_limit.unwrap_or(usize::MAX),
         };
         let root = res.traverse(&mut visited, root, egraph, &pool);
         res.zdd = root;
@@ -202,6 +180,9 @@ impl<E: Egraph> Extractor<E> {
         if nodes.is_empty() {
             return self.bot.clone();
         }
+
+        let start_nodes = self.zdd.pool().size();
+
         let mut outer_nodes = pool.zdd_vec();
         for node in nodes.drain(..) {
             let node_id = self.get_zdd_node(&node);
@@ -221,6 +202,12 @@ impl<E: Egraph> Extractor<E> {
         let mut composite = outer_nodes.pop().unwrap();
         for node in outer_nodes.drain(..) {
             composite.merge(&node);
+        }
+        let pool_delta = self.zdd.pool().size().saturating_sub(start_nodes);
+        if pool_delta > self.node_limit
+            && composite.count_nodes(&mut self.visited_set) > self.node_limit
+        {
+            composite.freeze();
         }
         *visited.get_mut(&class).unwrap() = Some(composite.clone());
         composite

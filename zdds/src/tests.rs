@@ -1,6 +1,6 @@
 use petgraph::dot::Dot;
 
-use crate::{choose_nodes, extract_greedy, Egraph, Zdd, ZddPool};
+use crate::{extract_greedy, extract_zdd, Egraph, Zdd, ZddPool};
 
 #[test]
 fn basic_merge() {
@@ -124,9 +124,9 @@ fn extract_tiny_egraph() {
         classes: vec![vec![0]],
     };
 
-    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extraction should succeed");
-    assert_eq!(cost, 1);
-    assert_eq!(nodes, vec![0]);
+    let (result, _) = extract_zdd(&mut egraph, 0, None).expect("extraction should succeed");
+    assert_eq!(result.total_cost, 1);
+    assert_eq!(result.dag.node_count(), 1);
 }
 
 #[test]
@@ -144,9 +144,40 @@ fn extract_tiny_egraph_greedy() {
 #[test]
 fn extract_sharing() {
     let mut egraph = egraph_sharing();
-    let (nodes, cost) = choose_nodes(&mut egraph, 0, None).expect("extraction should succeed");
-    assert_eq!(nodes, vec![0, 3, 1]);
-    assert_eq!(cost, 6);
+    let (result, _) = extract_zdd(&mut egraph, 0, None).expect("extraction should succeed");
+    assert_eq!(result.dag.node_count(), 3);
+    assert_eq!(result.total_cost, 6);
+    const EXPECTED: &str = r#"digraph {
+    0 [ label = "0" ]
+    1 [ label = "3" ]
+    2 [ label = "1" ]
+    0 -> 1 [ label = "()" ]
+    2 -> 1 [ label = "()" ]
+    0 -> 2 [ label = "()" ]
+}
+"#;
+    assert_eq!(format!("{:?}", Dot::new(&result.dag)), EXPECTED);
+}
+
+#[test]
+fn extract_sharing_low_limit() {
+    // If we lower the node limit to only contain a single element at a time, we
+    // get a DAG isomorphic to the one returned by greedy.
+    let mut egraph = egraph_sharing();
+    let (result, _) = extract_zdd(&mut egraph, 0, Some(2)).expect("extraction should succeed");
+    assert_eq!(result.dag.node_count(), 4);
+    assert_eq!(result.total_cost, 7);
+    const EXPECTED: &str = r#"digraph {
+    0 [ label = "0" ]
+    1 [ label = "3" ]
+    2 [ label = "2" ]
+    3 [ label = "4" ]
+    0 -> 1 [ label = "()" ]
+    2 -> 3 [ label = "()" ]
+    0 -> 2 [ label = "()" ]
+}
+"#;
+    assert_eq!(format!("{:?}", Dot::new(&result.dag)), EXPECTED);
 }
 
 #[test]
@@ -155,7 +186,6 @@ fn extract_sharing_greedy() {
     let result = extract_greedy(&mut egraph, 0).expect("extraction should succeed");
     assert_eq!(result.dag.node_count(), 4);
     assert_eq!(result.total_cost, 7);
-    // TODO: why does it do this? Isn't it supposed to find the wrong one?
     const EXPECTED: &str = r#"digraph {
     0 [ label = "0" ]
     1 [ label = "3" ]

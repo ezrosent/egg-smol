@@ -66,8 +66,8 @@
 (union s7a s7b)
 (union t7a t7b)
 
-(define sna s6a)
-(define tna t6a)
+(define sna s7a)
+(define tna t7a)
 
 (define rs (Root sna))
 (define rt (Root tna))

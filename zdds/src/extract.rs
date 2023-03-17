@@ -1,18 +1,52 @@
-use petgraph::{prelude::NodeIndex, visit::Dfs};
+//! Routines for extracting DAGs of ENodes from an EGraph.
+use std::hash::Hash;
 
-use crate::{
-    egraph::{ExtractResult, Pool},
-    Dag, Egraph, HashMap, HashSet,
-};
+use petgraph::{prelude::NodeIndex, visit::Dfs, Directed, Graph};
+
+use crate::{choose_nodes, egraph::Pool, Egraph, HashMap, HashSet, Report};
+
+/// The type used to return DAGs of expressions during extraction.
+///
+/// This is just a type alias for the underlying petgraph type, which is a
+/// general graph rather than an acylic one.
+pub type Dag<T> = Graph<T, (), Directed>;
+
+/// The output "term" returned by an extaction procedure, represented as a
+/// graph.
+pub struct ExtractResult<T> {
+    pub root: NodeIndex,
+    pub dag: Dag<T>,
+    pub total_cost: usize,
+}
 
 pub fn extract_greedy<E: Egraph>(
     egraph: &mut E,
     root: E::EClassId,
 ) -> Option<ExtractResult<E::ENodeId>> {
+    extract(egraph, root, NullFilter)
+}
+
+pub fn extract_zdd<E: Egraph>(
+    egraph: &mut E,
+    root: E::EClassId,
+    node_limit: Option<usize>,
+) -> Option<(ExtractResult<E::ENodeId>, Report)> {
+    let mut report = Report::default();
+    let (nodes, _) = choose_nodes(egraph, root.clone(), Some(&mut report), node_limit)?;
+    let extract_result = extract(egraph, root, SetFilter(nodes.iter().cloned().collect()))?;
+    Some((extract_result, report))
+}
+
+pub(crate) fn extract<E: Egraph, F: ENodeFilter<E::ENodeId>>(
+    egraph: &mut E,
+    root: E::EClassId,
+    filter: F,
+) -> Option<ExtractResult<E::ENodeId>> {
     let mut extractor = Extractor {
         graph: Default::default(),
         hashcons: Default::default(),
         egraph,
+        filter,
     };
     let pool = Pool::default();
     let (root_node, _) = extractor.traverse_class(root, &pool)?;
@@ -24,13 +58,14 @@ pub fn extract_greedy<E: Egraph>(
     })
 }
 
-struct Extractor<'a, E: Egraph> {
+struct Extractor<'a, E: Egraph, Filter> {
     graph: Dag<E::ENodeId>,
     hashcons: HashMap<E::ENodeId, Option<(NodeIndex, usize)>>,
     egraph: &'a mut E,
+    filter: Filter,
 }
 
-impl<'a, E: Egraph> Extractor<'a, E> {
+impl<'a, E: Egraph, Filter: ENodeFilter<E::ENodeId>> Extractor<'a, E, Filter> {
     fn prune_and_compute_cost(&mut self, root: NodeIndex) -> usize {
         // We don't want to use the cost in `hashcons` because it can
         // double-count nodes that have multiple parents in the DAG.
@@ -47,6 +82,7 @@ impl<'a, E: Egraph> Extractor<'a, E> {
     fn traverse_class(&mut self, class: E::EClassId, pool: &Pool<E>) -> Option<(NodeIndex, usize)> {
         let mut nodes = pool.node_vec();
         self.egraph.expand_class(&class, &mut nodes);
+        self.filter.filter(&mut nodes);
         nodes
             .drain(..)
             .filter_map(|node| self.traverse_node(node, pool))
@@ -78,5 +114,23 @@ impl<'a, E: Egraph> Extractor<'a, E> {
         self.hashcons.insert(node, res);
 
         res
+    }
+}
+
+pub(crate) trait ENodeFilter<T> {
+    fn filter(&self, enodes: &mut Vec<T>);
+}
+
+pub(crate) struct NullFilter;
+
+impl<T> ENodeFilter<T> for NullFilter {
+    fn filter(&self, _: &mut Vec<T>) {}
+}
+
+pub(crate) struct SetFilter<T>(HashSet<T>);
+
+impl<T: Eq + Hash> ENodeFilter<T> for SetFilter<T> {
+    fn filter(&self, enodes: &mut Vec<T>) {
+        enodes.retain(|node| self.0.contains(node))
     }
 }
