@@ -202,6 +202,7 @@ dependencies = [
  "num-rational",
  "num-traits",
  "ordered-float",
+ "petgraph",
  "regex",
  "rustc-hash",
  "smallvec",

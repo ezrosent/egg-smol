@@ -10,7 +10,7 @@ pub(crate) mod zdd;
 mod tests;
 
 pub use egraph::{choose_nodes, Egraph};
-pub use extract::{extract_greedy, extract_zdd, Dag};
+pub use extract::{extract_greedy, extract_zdd, Dag, ExtractResult};
 pub use zdd::{gc_zdds, Report, Zdd, ZddPool};
 
 use rustc_hash::FxHasher;
