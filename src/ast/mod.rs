@@ -89,9 +89,9 @@ pub enum NCommand {
         variants: usize,
         var: Symbol,
     },
-    ExtractZdd {
+    ExtractDag {
         var: Symbol,
-        cost_only: bool,
+        zdd: bool,
     },
     Check(Vec<NormFact>),
     Print(Symbol, usize),
@@ -145,9 +145,12 @@ impl NCommand {
                 variants: *variants,
                 e: Expr::Var(*var),
             },
-            NCommand::ExtractZdd { var, cost_only } => Command::ExtractZdd {
+            NCommand::ExtractDag {
+                var,
+                zdd: cost_only,
+            } => Command::ExtractDag {
                 e: Expr::Var(*var),
-                cost_only: *cost_only,
+                zdd: *cost_only,
             },
             NCommand::Check(facts) => {
                 Command::Check(facts.iter().map(|fact| fact.to_fact()).collect())
@@ -194,9 +197,12 @@ impl NCommand {
                 variants: *variants,
                 var: *var,
             },
-            NCommand::ExtractZdd { var, cost_only } => NCommand::ExtractZdd {
+            NCommand::ExtractDag {
+                var,
+                zdd: cost_only,
+            } => NCommand::ExtractDag {
                 var: *var,
-                cost_only: *cost_only,
+                zdd: *cost_only,
             },
             NCommand::Check(facts) => {
                 NCommand::Check(facts.iter().map(|fact| fact.map_exprs(f)).collect())
@@ -326,9 +332,9 @@ pub enum Command {
         variants: usize,
         e: Expr,
     },
-    ExtractZdd {
+    ExtractDag {
         e: Expr,
-        cost_only: bool,
+        zdd: bool,
     },
     // TODO: this could just become an empty query
     Check(Vec<Fact>),
@@ -429,11 +435,15 @@ impl Command {
                 Sexp::String(variants.to_string()),
                 e.to_sexp(),
             ]),
-            Command::ExtractZdd { e, cost_only } => {
-                if *cost_only {
-                    Sexp::List(vec![Sexp::String("extract-zdd-cost".into()), e.to_sexp()])
+            Command::ExtractDag { e, zdd } => {
+                if *zdd {
+                    Sexp::List(vec![
+                        Sexp::String("extract-dag".into()),
+                        e.to_sexp(),
+                        Sexp::String(":zdd".into()),
+                    ])
                 } else {
-                    Sexp::List(vec![Sexp::String("extract-zdd".into()), e.to_sexp()])
+                    Sexp::List(vec![Sexp::String("extract-dag".into()), e.to_sexp()])
                 }
             }
             Command::Check(facts) => Sexp::List(

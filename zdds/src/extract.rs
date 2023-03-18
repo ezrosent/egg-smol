@@ -1,15 +1,16 @@
 //! Routines for extracting DAGs of ENodes from an EGraph.
 use std::hash::Hash;
 
-use petgraph::{prelude::NodeIndex, visit::Dfs, Directed, Graph};
+use petgraph::{prelude::NodeIndex, stable_graph::StableDiGraph, visit::Dfs};
 
 use crate::{choose_nodes, egraph::Pool, Egraph, HashMap, HashSet, Report};
 
 /// The type used to return DAGs of expressions during extraction.
 ///
 /// This is just a type alias for the underlying petgraph type, which is a
-/// general graph rather than an acylic one.
-pub type Dag<T> = Graph<T, (), Directed>;
+/// general graph rather than an acylic one. We use the "Stable" variant because
+/// we remove any unreachable nodes from the DAG before returning it.
+pub type Dag<T> = StableDiGraph<T, ()>;
 
 /// The output "term" returned by an extaction procedure, represented as a
 /// graph.

@@ -76,5 +76,6 @@
 (run 1)
 
 (extract rs)
-(extract-zdd-cost rs)
+(extract-dag rs :zdd)
+(extract-dag rs)
 

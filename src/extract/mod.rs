@@ -1,5 +1,5 @@
 //! Algorithms for extraction.
+mod dag;
 mod greedy;
-mod zdd;
 
 pub type Cost = usize;

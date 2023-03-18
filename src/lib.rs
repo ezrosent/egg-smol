@@ -816,19 +816,21 @@ impl EGraph {
                 }
             }
 
-            NCommand::ExtractZdd { var, cost_only } => {
+            NCommand::ExtractDag { var, zdd } => {
                 let expr = Expr::Var(var);
                 if should_run {
-                    if cost_only {
-                        let (cost, report) = self.extract_zdd_cost(expr)?;
-                        format!("Optimal expression cost {cost}:\n{report}")
+                    // TODO typecheck
+                    if zdd {
+                        let (exprs, report, cost) = self.dag_from_expr_zdd(expr)?;
+                        let display = ListDisplay(exprs, "\n");
+                        format!("Extracted expression DAG with cost {cost}:\n{display}\n{report}")
                     } else {
-                        // TODO typecheck
-                        let (cost, expr) = self.extract_zdd(expr)?;
-                        format!("Extracted (ZDD) with cost {cost}: {expr}")
+                        let (exprs, cost) = self.dag_from_expr_greedy(expr)?;
+                        let display = ListDisplay(exprs, "\n");
+                        format!("Extracted expression DAG with cost {cost}:\n{display}")
                     }
                 } else {
-                    "Skipping ZDD extraction.".into()
+                    "Skipping DAG extraction.".into()
                 }
             }
             NCommand::Check(facts) => {
@@ -1001,18 +1003,22 @@ impl EGraph {
         Ok((cost, expr, exprs))
     }
 
-    pub fn extract_zdd(&mut self, e: Expr) -> Result<(usize, Expr), Error> {
+    pub fn dag_from_expr_greedy(&mut self, e: Expr) -> Result<(Vec<Expr>, usize), Error> {
         let (_t, value) = self.eval_expr(&e, None, true)?;
-        if let Some((cost, expr)) = self.optimal_expr(value) {
-            Ok((cost, expr))
+        if let Some(res) = self.dag_greedy(value) {
+            Ok(res)
         } else {
             Err(Error::UnableToGroundZdd)
         }
     }
-    pub fn extract_zdd_cost(&mut self, e: Expr) -> Result<(usize, zdds::Report), Error> {
+
+    pub fn dag_from_expr_zdd(
+        &mut self,
+        e: Expr,
+    ) -> Result<(Vec<Expr>, zdds::Report, usize), Error> {
         let (_t, value) = self.eval_expr(&e, None, true)?;
-        if let Some((cost, report)) = self.optimal_cost(value) {
-            Ok((cost, report))
+        if let Some(res) = self.dag_zdd(value) {
+            Ok(res)
         } else {
             Err(Error::UnableToGroundZdd)
         }

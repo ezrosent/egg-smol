@@ -14,5 +14,5 @@
 (run 1)
 
 (extract root)
-(extract-zdd root)
-(extract-zdd-cost root)
+(extract-dag root)
+(extract-dag root :zdd)
