@@ -1,6 +1,8 @@
 use petgraph::dot::Dot;
 
-use crate::{extract_greedy, extract_zdd, Egraph, Zdd, ZddPool};
+use crate::{
+    choose_nodes, egraph::render_zdd, extract_greedy, extract_zdd, Egraph, Report, Zdd, ZddPool,
+};
 
 #[test]
 fn basic_merge() {
@@ -222,6 +224,80 @@ fn egraph_sharing() -> FakeEgraph {
             (vec![], 2),
             // e
             (vec![], 1),
+        ],
+    }
+}
+
+#[test]
+fn print_egraph_example() {
+    let mut egraph = egraph_example();
+
+    eprintln!(
+        "{}",
+        render_zdd(&mut egraph, 0, |n| {
+            match *n {
+                0 => "root",
+                1 => "a",
+                2 => "b",
+                3 => "c",
+                4 => "d",
+                5 => "e",
+                6 => "f",
+                7 => "g",
+                8 => "h",
+                _ => "UNKNOWN",
+            }
+            .into()
+        })
+    );
+    let mut report = Report::default();
+    choose_nodes(&mut egraph, 0, Some(&mut report), None);
+    eprintln!("{report}");
+}
+
+fn egraph_example() -> FakeEgraph {
+    let _c_root = 0;
+    let c_w = 1;
+    let c_x = 2;
+    let c_y = 3;
+    let c_z = 4;
+
+    let n_root = 0;
+    let n_a = 1;
+    let n_b = 2;
+    let n_c = 3;
+    let n_d = 4;
+    let n_e = 5;
+    let n_f = 6;
+
+    FakeEgraph {
+        nodes: vec![
+            // n_root
+            (vec![c_w, c_x], 1),
+            // n_a
+            (vec![c_y, c_z], 1),
+            // n_b
+            (vec![c_y], 1),
+            // n_c
+            (vec![c_y, c_z], 1),
+            // n_d
+            (vec![c_z], 1),
+            // n_e
+            (vec![], 1),
+            // n_f
+            (vec![], 1),
+        ],
+        classes: vec![
+            // c_root
+            vec![n_root],
+            // c_w
+            vec![n_a, n_b],
+            // c_x
+            vec![n_c, n_d],
+            // c_y
+            vec![n_e],
+            // c_z
+            vec![n_f],
         ],
     }
 }

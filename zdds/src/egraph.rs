@@ -38,6 +38,24 @@ pub trait Egraph {
     fn cost(&self, node: &Self::ENodeId) -> usize;
 }
 
+/// Create a mermaid diagram of the ZDD representing possible extractions from
+/// the egraph. This function does not pass a node limit.
+pub fn render_zdd<E: Egraph>(
+    egraph: &mut E,
+    root: E::EClassId,
+    mut render_node: impl FnMut(&E::ENodeId) -> String,
+) -> String {
+    let extractor = Extractor::new(root, egraph, None);
+    extractor.zdd.mermaid_diagram(|zdd_node| {
+        render_node(
+            extractor
+                .node_mapping
+                .get_index(zdd_node.index())
+                .expect("all nodes should be valid"),
+        )
+    })
+}
+
 /// Given an Egraph, pick the minimum-cost set of enodes to be used during
 /// extraction.
 pub fn choose_nodes<E: Egraph>(
@@ -185,13 +203,13 @@ impl<E: Egraph> Extractor<E> {
 
         let mut outer_nodes = pool.zdd_vec();
         for node in nodes.drain(..) {
-            let node_id = self.get_zdd_node(&node);
             let mut classes = pool.class_vec();
             egraph.get_children(&node, &mut classes);
             let mut inner_nodes = pool.zdd_vec();
             for class in classes.drain(..) {
                 inner_nodes.push(self.traverse(visited, class, egraph, pool));
             }
+            let node_id = self.get_zdd_node(&node);
 
             let mut composite = Zdd::singleton(self.zdd.pool().clone(), node_id);
             for node in inner_nodes.drain(..) {

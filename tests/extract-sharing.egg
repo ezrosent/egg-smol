@@ -66,6 +66,13 @@
 (union s7a s7b)
 (union t7a t7b)
 
+(define s8a (S s7a t6a))
+(define s8b (S t7a s6a))
+(define t8a (T s7a))
+(define t8b (T t7a))
+(union s8a s8b)
+(union t8a t8b)
+
 (define sna s7a)
 (define tna t7a)
 

@@ -9,7 +9,7 @@ pub(crate) mod zdd;
 #[cfg(test)]
 mod tests;
 
-pub use egraph::{choose_nodes, Egraph};
+pub use egraph::{choose_nodes, render_zdd, Egraph};
 pub use extract::{extract_greedy, extract_zdd, Dag, ExtractResult};
 pub use zdd::{gc_zdds, Report, Zdd, ZddPool};
 

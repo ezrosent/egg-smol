@@ -423,6 +423,35 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
         self.dfs(node.hi, visited);
         self.dfs(node.lo, visited);
     }
+    fn mermaid_diagram(
+        &self,
+        node_id: NodeId,
+        diagram: &mut MermaidDiagram,
+        render: &mut impl FnMut(&T) -> String,
+        visited: &mut HashMap<NodeId, String>,
+    ) -> String {
+        if node_id == BOT {
+            return MermaidDiagram::bot();
+        }
+        if node_id == UNIT {
+            return MermaidDiagram::top();
+        }
+        if let Some(id) = visited.get(&node_id) {
+            return id.clone();
+        }
+        let node = self.get_node(node_id);
+        let lo = self.mermaid_diagram(node.lo, diagram, render, visited);
+        let hi = self.mermaid_diagram(node.hi, diagram, render, visited);
+        let rendered = match &node.item {
+            Val::Base(b) => render(b),
+            Val::Meta(_) => "meta".into(),
+        };
+        let id = format!("{}", node_id.0);
+        diagram.prelude.push(format!("{id}[\"{rendered}\"]"));
+        diagram.nodes.push(((id.clone(), lo), (id.clone(), hi)));
+        visited.insert(node_id, id.clone());
+        id
+    }
     fn universe_size(
         &self,
         node_id: NodeId,
@@ -618,6 +647,22 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
         self.root = self.pool.0.borrow_mut().frozen(self.root);
     }
 
+    /// Render a mermaid diagram representing the ZDD.
+    ///
+    /// This method is not terribly efficient, but it should be sufficient for
+    /// producing diagrams for small ZDDs, particularly if they are below the
+    /// node limit. Frozen nodes are not rendered.
+    pub fn mermaid_diagram(&self, mut render_node: impl FnMut(&T) -> String) -> String {
+        let mut diagram = MermaidDiagram::default();
+        self.pool.0.borrow().mermaid_diagram(
+            self.root,
+            &mut diagram,
+            &mut render_node,
+            &mut Default::default(),
+        );
+        diagram.render()
+    }
+
     /// Iterate over the sets represented by the Zdd.
     ///
     /// This operation should more or less only be used for debugging or
@@ -678,14 +723,14 @@ impl NodeId {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Hash)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
 struct Node<T> {
     item: T,
     hi: NodeId,
     lo: NodeId,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Val<T> {
     Base(T),
     Meta(NodeId),
@@ -793,4 +838,45 @@ impl<T> Default for BackChainTable<T> {
 enum Link<T> {
     Cons { elt: T, next: LinkId },
     Union { l: LinkId, r: LinkId },
+}
+
+type Edge = (String, String);
+struct MermaidDiagram {
+    prelude: Vec<String>,
+    nodes: Vec<(Edge, Edge)>,
+}
+
+impl Default for MermaidDiagram {
+    fn default() -> MermaidDiagram {
+        MermaidDiagram {
+            prelude: vec!["TOP[\"#8868;\"]".into(), "BOT[\"#8869;\"]".into()],
+            nodes: vec![],
+        }
+    }
+}
+
+impl MermaidDiagram {
+    fn bot() -> String {
+        "BOT".into()
+    }
+    fn top() -> String {
+        "TOP".into()
+    }
+    fn render(&self) -> String {
+        let mut res: String = "flowchart TB\n".into();
+        for decl in &self.prelude {
+            res.push('\t');
+            res.push_str(decl);
+            res.push('\n');
+        }
+        for (lo, hi) in &self.nodes {
+            res.push('\t');
+            res.push_str(&format!("{} -.-> {}", lo.0, lo.1));
+            res.push('\n');
+            res.push('\t');
+            res.push_str(&format!("{} ---> {}", hi.0, hi.1));
+            res.push('\n');
+        }
+        res
+    }
 }
