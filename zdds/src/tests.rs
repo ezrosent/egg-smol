@@ -191,11 +191,11 @@ fn extract_sharing_greedy() {
     const EXPECTED: &str = r#"digraph {
     0 [ label = "0" ]
     1 [ label = "3" ]
-    2 [ label = "4" ]
     3 [ label = "2" ]
+    4 [ label = "4" ]
     0 -> 1 [ label = "()" ]
+    3 -> 4 [ label = "()" ]
     0 -> 3 [ label = "()" ]
-    3 -> 2 [ label = "()" ]
 }
 "#;
     assert_eq!(format!("{:?}", Dot::new(&result.dag)), EXPECTED);

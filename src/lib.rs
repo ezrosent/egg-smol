@@ -821,9 +821,9 @@ impl EGraph {
                 if should_run {
                     // TODO typecheck
                     if zdd {
-                        let (exprs, report, cost) = self.dag_from_expr_zdd(expr)?;
+                        let (exprs, report, cost, dur) = self.dag_from_expr_zdd(expr)?;
                         let display = ListDisplay(exprs, "\n");
-                        format!("Extracted expression DAG with cost {cost}:\n{display}\n{report}")
+                        format!("Extracted expression DAG with cost {cost} in {dur:?}:\n{display}\n{report}")
                     } else {
                         let (exprs, cost) = self.dag_from_expr_greedy(expr)?;
                         let display = ListDisplay(exprs, "\n");
@@ -1015,7 +1015,7 @@ impl EGraph {
     pub fn dag_from_expr_zdd(
         &mut self,
         e: Expr,
-    ) -> Result<(Vec<Expr>, zdds::Report, usize), Error> {
+    ) -> Result<(Vec<Expr>, zdds::Report, usize, Duration), Error> {
         let (_t, value) = self.eval_expr(&e, None, true)?;
         if let Some(res) = self.dag_zdd(value) {
             Ok(res)

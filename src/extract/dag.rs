@@ -1,5 +1,6 @@
 //! Extraction of expression DAGs with algorithms that leverage sharing in the
 //! EGraph.
+use instant::{Duration, Instant};
 use petgraph::prelude::NodeIndex;
 use symbol_table::GlobalSymbol;
 
@@ -122,18 +123,20 @@ impl<'a> zdds::Egraph for DagExtractor<'a> {
     }
 }
 
-const ZDD_NODE_LIMIT: Option<usize> = Some(16 << 10);
+const ZDD_NODE_LIMIT: Option<usize> = Some(4 << 10);
 
 impl EGraph {
     /// Extract a sequence of expressions, the last of which yields a
     /// representative to `v`.
     ///
     /// This method uses ZDDs include sharing in the cost calculations.
-    pub fn dag_zdd(&self, v: Value) -> Option<(Vec<Expr>, zdds::Report, Cost)> {
+    pub fn dag_zdd(&self, v: Value) -> Option<(Vec<Expr>, zdds::Report, Cost, Duration)> {
+        let start = Instant::now();
         let mut extractor = DagExtractor::new(self);
         let (result, report) = zdds::extract_zdd(&mut extractor, v, ZDD_NODE_LIMIT)?;
         let exprs = extractor.render_dag(&result);
-        Some((exprs, report, result.total_cost))
+        let dur = Instant::now().duration_since(start);
+        Some((exprs, report, result.total_cost, dur))
     }
 
     /// Extract a sequence of expressions, the last of which yields a

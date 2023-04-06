@@ -70,6 +70,9 @@ fn make_node_with_set<T: Eq + Hash>(
     hi: NodeId,
     nodes: &mut IndexSet<Node<T>, impl BuildHasher>,
 ) -> NodeId {
+    if hi == BOT {
+        return lo;
+    }
     let node = Node { item, lo, hi };
     if let Some(id) = nodes.get_index_of(&node) {
         return NodeId::new(id);
