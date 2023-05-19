@@ -1,0 +1,19 @@
+[package]
+name = "egglog-exp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hashbrown = { version = "0.13", features = ["raw"] }
+indexmap = "1.9"
+rustc-hash = "1.1"
+fixedbitset = "0.4"
+smallvec = "1.10"
+bumpalo = "3.12"
+thiserror = "1.0"
+anyhow = "1.0"
+lazy_static = { version = "1.4", optional = true }
+
+[features]
+default = []
+debug-val-trace = ["dep:lazy_static"]
