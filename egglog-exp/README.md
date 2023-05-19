@@ -4,7 +4,8 @@ This crate contains utilities that could serve as a "backend" for the egglog
 language. As the language grows and acquires more features, it may be a good
 idea to split out core functionality into separate crates. This crate implements
 core database and query primitives, other crates could implement: syntax,
-type-checking, extraction, etc. 
+type-checking, extraction, etc. So far, this crate includes enough to run most egglog
+examples, though it is currently missing support for merge functions and sets / maps.
 
 In addition to factoring some utilities out, this crate explores the following
 techniques:
