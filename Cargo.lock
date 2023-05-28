@@ -185,6 +185,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "egg"
+version = "0.6.1-dev"
+source = "git+https://github.com/yycdavid/egg?rev=12cc1ee7731d37fe91901c81f59678fa1d08a2bb#12cc1ee7731d37fe91901c81f59678fa1d08a2bb"
+dependencies = [
+ "indexmap",
+ "instant",
+ "log",
+ "once_cell",
+ "smallvec",
+ "symbolic_expressions 5.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "egg-smol"
 version = "0.1.0"
 dependencies = [
@@ -207,8 +220,17 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "symbol_table",
- "symbolic_expressions",
+ "symbolic_expressions 5.0.3 (git+https://github.com/oflatt/symbolic-expressions?rev=4c0ea5ca008f972450b2af72387e64d2c1c6a791)",
  "thiserror",
+ "zdds",
+]
+
+[[package]]
+name = "egg-zdd-bridge"
+version = "0.1.0"
+dependencies = [
+ "egg",
+ "petgraph",
  "zdds",
 ]
 
@@ -748,6 +770,12 @@ dependencies = [
  "ahash 0.7.6",
  "hashbrown 0.12.3",
 ]
+
+[[package]]
+name = "symbolic_expressions"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c68d531d83ec6c531150584c42a4290911964d5f0d79132b193b67252a23b71"
 
 [[package]]
 name = "symbolic_expressions"

@@ -1,0 +1,11 @@
+[package]
+name = "egg-zdd-bridge"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+egg = {git = "https://github.com/yycdavid/egg", rev = "12cc1ee7731d37fe91901c81f59678fa1d08a2bb" }
+zdds = {path = "../zdds"}
+petgraph = "0.6.3"

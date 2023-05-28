@@ -3,7 +3,11 @@ use std::hash::Hash;
 
 use petgraph::{prelude::NodeIndex, stable_graph::StableDiGraph, visit::Dfs};
 
-use crate::{choose_nodes, egraph::Pool, Egraph, HashMap, HashSet, Report};
+use crate::{
+    choose_nodes,
+    egraph::{Cost, Pool},
+    Egraph, HashMap, HashSet, Report,
+};
 
 /// The type used to return DAGs of expressions during extraction.
 ///
@@ -17,7 +21,7 @@ pub type Dag<T> = StableDiGraph<T, ()>;
 pub struct ExtractResult<T> {
     pub root: NodeIndex,
     pub dag: Dag<T>,
-    pub total_cost: usize,
+    pub total_cost: Cost,
 }
 
 pub fn extract_greedy<E: Egraph>(
@@ -67,15 +71,15 @@ struct Extractor<'a, E: Egraph, Filter> {
 }
 
 impl<'a, E: Egraph, Filter: ENodeFilter<E::ENodeId>> Extractor<'a, E, Filter> {
-    fn prune_and_compute_cost(&mut self, root: NodeIndex) -> usize {
+    fn prune_and_compute_cost(&mut self, root: NodeIndex) -> Cost {
         // We don't want to use the cost in `hashcons` because it can
         // double-count nodes that have multiple parents in the DAG.
-        let mut cost = 0usize;
+        let mut cost = 0.0;
         let mut visited = HashSet::default();
         let mut dfs = Dfs::new(&self.graph, root);
         while let Some(n) = dfs.next(&self.graph) {
             visited.insert(n);
-            cost = cost.saturating_add(self.egraph.cost(self.graph.node_weight(n).unwrap()));
+            cost += self.egraph.cost_f64(self.graph.node_weight(n).unwrap());
         }
         self.graph.retain_nodes(|_, x| visited.contains(&x));
         cost

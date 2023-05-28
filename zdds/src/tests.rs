@@ -129,7 +129,7 @@ fn extract_tiny_egraph() {
     };
 
     let (result, _) = extract_zdd(&mut egraph, 0, None).expect("extraction should succeed");
-    assert_eq!(result.total_cost, 1);
+    assert_eq!(result.total_cost, 1.0);
     assert_eq!(result.dag.node_count(), 1);
 }
 
@@ -141,7 +141,7 @@ fn extract_tiny_egraph_greedy() {
     };
 
     let result = extract_greedy(&mut egraph, 0).expect("extraction should succeed");
-    assert_eq!(result.total_cost, 1);
+    assert_eq!(result.total_cost, 1.0);
     assert_eq!(result.dag.node_count(), 1);
 }
 
@@ -150,7 +150,7 @@ fn extract_sharing() {
     let mut egraph = egraph_sharing();
     let (result, _) = extract_zdd(&mut egraph, 0, None).expect("extraction should succeed");
     assert_eq!(result.dag.node_count(), 3);
-    assert_eq!(result.total_cost, 6);
+    assert_eq!(result.total_cost, 6.0);
     const EXPECTED: &str = r#"digraph {
     0 [ label = "0" ]
     1 [ label = "3" ]
@@ -170,7 +170,7 @@ fn extract_sharing_low_limit() {
     let mut egraph = egraph_sharing();
     let (result, _) = extract_zdd(&mut egraph, 0, Some(2)).expect("extraction should succeed");
     assert_eq!(result.dag.node_count(), 4);
-    assert_eq!(result.total_cost, 7);
+    assert_eq!(result.total_cost, 7.0);
     const EXPECTED: &str = r#"digraph {
     0 [ label = "0" ]
     1 [ label = "3" ]
@@ -189,7 +189,7 @@ fn extract_sharing_greedy() {
     let mut egraph = egraph_sharing();
     let result = extract_greedy(&mut egraph, 0).expect("extraction should succeed");
     assert_eq!(result.dag.node_count(), 4);
-    assert_eq!(result.total_cost, 7);
+    assert_eq!(result.total_cost, 7.0);
     const EXPECTED: &str = r#"digraph {
     0 [ label = "0" ]
     1 [ label = "3" ]

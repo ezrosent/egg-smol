@@ -136,7 +136,7 @@ impl EGraph {
         let (result, report) = zdds::extract_zdd(&mut extractor, v, ZDD_NODE_LIMIT)?;
         let exprs = extractor.render_dag(&result);
         let dur = Instant::now().duration_since(start);
-        Some((exprs, report, result.total_cost, dur))
+        Some((exprs, report, result.total_cost.floor() as Cost, dur))
     }
 
     /// Extract a sequence of expressions, the last of which yields a
@@ -148,6 +148,6 @@ impl EGraph {
         let mut extractor = DagExtractor::new(self);
         let result = zdds::extract_greedy(&mut extractor, v)?;
         let exprs = extractor.render_dag(&result);
-        Some((exprs, result.total_cost))
+        Some((exprs, result.total_cost.floor() as Cost))
     }
 }
