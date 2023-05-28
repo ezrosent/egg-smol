@@ -9,7 +9,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::{fixed_cache::Cache, HashMap, HashSet};
+use crate::{egraph::Cost, fixed_cache::Cache, HashMap, HashSet};
 use indexmap::IndexSet;
 use rustc_hash::FxHasher;
 
@@ -146,15 +146,15 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
     fn min_cost_set(
         &self,
         table: &mut BackChainTable<T>,
-        memo: &mut HashMap<NodeId, Option<(LinkId, usize)>>,
-        cost: &impl Fn(&T) -> usize,
+        memo: &mut HashMap<NodeId, Option<(LinkId, Cost)>>,
+        cost: &impl Fn(&T) -> Cost,
         node: NodeId,
-    ) -> Option<(LinkId, usize)> {
+    ) -> Option<(LinkId, Cost)> {
         if node == BOT {
             return None;
         }
         if node == UNIT {
-            return Some((NIL, 0));
+            return Some((NIL, 0.0));
         }
         if let Some(x) = memo.get(&node) {
             return *x;
@@ -166,21 +166,16 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
             match (lo_cost, hi_cost) {
                 (None, None) => None,
                 (None, Some((chain, opt))) => match &rep.item {
-                    Val::Base(t) => {
-                        Some((table.cons(t.clone(), chain), opt.saturating_add(cost(t))))
-                    }
+                    Val::Base(t) => Some((table.cons(t.clone(), chain), opt + cost(t))),
                     Val::Meta(n) => {
                         let (inner_chain, inner_cost) = self.min_cost_set(table, memo, cost, *n)?;
-                        Some((
-                            table.merge(inner_chain, chain),
-                            opt.saturating_add(inner_cost),
-                        ))
+                        Some((table.merge(inner_chain, chain), opt + inner_cost))
                     }
                 },
                 (Some(x), None) => Some(x),
                 (Some((lo_chain, lo_cost)), Some((hi_chain, hi_cost))) => match &rep.item {
                     Val::Base(t) => {
-                        let total_hi_cost = hi_cost.saturating_add(cost(t));
+                        let total_hi_cost = hi_cost + cost(t);
                         if lo_cost <= total_hi_cost {
                             Some((lo_chain, lo_cost))
                         } else {
@@ -191,7 +186,7 @@ impl<T: Eq + Hash + Ord + Clone> ZddPoolRep<T> {
                         if let Some((inner_chain, inner_cost)) =
                             self.min_cost_set(table, memo, cost, *n)
                         {
-                            let total_hi_cost = hi_cost.saturating_add(inner_cost);
+                            let total_hi_cost = hi_cost + inner_cost;
                             if lo_cost <= total_hi_cost {
                                 Some((lo_chain, lo_cost))
                             } else {
@@ -580,7 +575,7 @@ impl<T: Eq + Ord + Hash + Clone> Zdd<T> {
         Zdd { pool, root }
     }
 
-    pub fn min_cost_set(&self, cost: impl Fn(&T) -> usize) -> Option<(Vec<T>, usize)> {
+    pub fn min_cost_set(&self, cost: impl Fn(&T) -> Cost) -> Option<(Vec<T>, Cost)> {
         let mut table = BackChainTable::default();
         let mut memo = HashMap::default();
         let (elts, cost) = self

@@ -17,6 +17,8 @@ use crate::{
     HashSet, Zdd, ZddPool,
 };
 
+pub(crate) type Cost = f64;
+
 /// The `Egraph` trait encapsulates the core information required from an Egraph
 /// to encode the extraction problem.
 pub trait Egraph {
@@ -35,7 +37,15 @@ pub trait Egraph {
     /// For a given ENode, push all of its children into the `classes` vector.
     fn get_children(&mut self, node: &Self::ENodeId, classes: &mut Vec<Self::EClassId>);
 
-    fn cost(&self, node: &Self::ENodeId) -> usize;
+    fn cost(&self, node: &Self::ENodeId) -> usize {
+        (self.cost_f64(node) * 100.0) as usize
+    }
+
+    // TODO: just use cost_f64 and call it 'cost'
+
+    fn cost_f64(&self, node: &Self::ENodeId) -> Cost {
+        self.cost(node) as Cost
+    }
 }
 
 /// Create a mermaid diagram of the ZDD representing possible extractions from
@@ -63,13 +73,13 @@ pub fn choose_nodes<E: Egraph>(
     root: E::EClassId,
     report: Option<&mut Report>,
     node_limit: Option<usize>,
-) -> Option<(Vec<E::ENodeId>, usize)> {
+) -> Option<(Vec<E::ENodeId>, Cost)> {
     let extractor = Extractor::new(root, egraph, node_limit);
     let (zdd_nodes, cost) = extractor.zdd.min_cost_set(|zdd_node| {
         if *zdd_node == INFINITY {
-            usize::MAX
+            Cost::MAX
         } else {
-            egraph.cost(
+            egraph.cost_f64(
                 extractor
                     .node_mapping
                     .get_index(zdd_node.index())

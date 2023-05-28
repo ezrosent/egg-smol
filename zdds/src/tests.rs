@@ -1,7 +1,9 @@
 use petgraph::dot::Dot;
 
 use crate::{
-    choose_nodes, egraph::render_zdd, extract_greedy, extract_zdd, Egraph, Report, Zdd, ZddPool,
+    choose_nodes,
+    egraph::{render_zdd, Cost},
+    extract_greedy, extract_zdd, Egraph, Report, Zdd, ZddPool,
 };
 
 #[test]
@@ -37,9 +39,9 @@ fn basic_min_cost() {
     s1.add(vec![1, 2, 4, 5, 7]);
     s1.add(vec![2, 4, 5, 7]);
     let (set, cost) = s1
-        .min_cost_set(|x| *x as usize)
+        .min_cost_set(|x| *x as Cost)
         .expect("there should be a solution");
-    assert_eq!(cost, 12);
+    assert_eq!(cost, 12f64);
     assert_eq!(set, vec![1, 2, 4, 5]);
 }
 
