@@ -14,7 +14,7 @@ use crate::{
 /// This is just a type alias for the underlying petgraph type, which is a
 /// general graph rather than an acylic one. We use the "Stable" variant because
 /// we remove any unreachable nodes from the DAG before returning it.
-pub type Dag<T> = StableDiGraph<T, ()>;
+pub type Dag<T> = StableDiGraph<T, usize>;
 
 /// The output "term" returned by an extaction procedure, represented as a
 /// graph.
@@ -110,9 +110,9 @@ impl<'a, E: Egraph, Filter: ENodeFilter<E::ENodeId>> Extractor<'a, E, Filter> {
         self.egraph.get_children(&node, &mut classes);
         let mut total_cost = self.egraph.cost(&node);
         let new_node = self.graph.add_node(node.clone());
-        for class in classes.drain(..) {
+        for (i, class) in classes.drain(..).enumerate() {
             let (child, cost) = self.traverse_class(class, pool)?;
-            self.graph.add_edge(new_node, child, ());
+            self.graph.add_edge(new_node, child, i);
             total_cost = total_cost.saturating_add(cost);
         }
         let res = Some((new_node, total_cost));

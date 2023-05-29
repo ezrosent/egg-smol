@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use egg::{Analysis, Id, Language, RecExpr};
-use petgraph::stable_graph::NodeIndex;
+use petgraph::{stable_graph::NodeIndex, visit::EdgeRef};
 use zdds::{Dag, ExtractResult};
 
 pub fn extract_zdd<L, A>(
@@ -66,7 +66,12 @@ impl<L: Language> ExtractorEgraph<L> {
             return *id;
         }
         let mut lang_node = self.nodes[node_id].0.clone();
-        for (child_node, child_cell) in dag.neighbors(node).zip(lang_node.children_mut()) {
+        let mut edges = Vec::new();
+        for edge in dag.edges(node) {
+            edges.push((*edge.weight(), edge.target()));
+        }
+        edges.sort_by_key(|(x, _)| *x);
+        for ((_, child_node), child_cell) in edges.into_iter().zip(lang_node.children_mut()) {
             *child_cell = self.to_recexpr_inner(dag, memo, res, child_node);
         }
         let id = res.add(lang_node);
