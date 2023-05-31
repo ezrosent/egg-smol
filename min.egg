@@ -84,7 +84,7 @@
 
 (run-schedule (seq
 (saturate (seq (saturate (run parent__ 1)) (saturate (run rebuilding__ 1))))
-(run 100)))
+(run 6)))
 
 (check (= v302_____ 13) (= v300_____ (Num v301_____)) (= v305_____ v301_____) (= v303_____ (expr_Parent__ v306_____)) (= v307_____ (expr_Parent__ test1)) (= v304_____ (expr_Parent__ v308_____)) (= v309_____ (expr_Parent__ v310_____)) (= v305_____ v302_____) (= v306_____ v300_____) (= v307_____ v303_____) (= v308_____ test1) (= v310_____ v300_____) (= v309_____ v304_____))
 
