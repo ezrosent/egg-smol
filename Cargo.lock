@@ -89,6 +89,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "080e9890a082662b09c1ad45f567faeeb47f22b5fb23895fbe1e651e718e25ca"
+
+[[package]]
 name = "ascii-canvas"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -211,6 +217,21 @@ checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
 dependencies = [
  "cfg-if 1.0.0",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "core-relations"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bumpalo",
+ "fixedbitset",
+ "hashbrown 0.14.2",
+ "indexmap",
+ "lazy_static",
+ "rustc-hash",
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]
