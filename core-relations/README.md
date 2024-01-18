@@ -89,8 +89,8 @@ highlights:
   a table: the versioning system allows the system to refresh these caches when
   they become stale, or invalid.
 
-* Tables can buffer updates without having them take effect, if applying those
-  updates could cause existing `Subset`s to become invalidated. The way this is
+* Tables can buffer updates without having them take effect if applying those
+  updates could invalidate existing `Subset`s. The way this is
   enforced is via the separation of `stage` and `merge` methods: `stage` methods
   move data into a table, but changes are only guaranteed to propagate after a
   `merge` takes place.
@@ -99,17 +99,17 @@ highlights:
   evaluate simple predicates on rows. Tables can optionally communicate that
   some constraints can be computed extremely quickly, which allows them to be
   evaluated without an index. This is how egglog table "timestamps" are
-  supported (the query engine itself doesn't know about seminaive).
+  supported (the query engine itself doesn't know about timestamps or seminaive).
 
 There are a lot of details needed to get all of this to work, but the upshot is
 an implementation of free join that _doesn't care_ whether it is reading from a
 standard egglog table or whether it is reading from a union-find. Users can even
 define new tables outside of this crate and then query them the same way. The
 implementation also allows for egglog's encoding of seminaive evaluation to be
-written _on top_ of the existing backend (without any loss in performance).
+written _on top_ of the existing backend.
 
 ### Free Join
-This crate implements Free Join, a faster version of GJ with better batching.
+This crate implements Free Join, a faster version of GJ that allows for more batching.
 Unlike the original paper, this implemention generates a plan from scratch using
 a similar method to egglog, but one that tries to minimize both the _size_ of
 each stage but also the _number_ of stages.
@@ -134,7 +134,7 @@ directly into egglog's implementation.
 
 ### Basic Egglog
 For a brief demo of what it looks like to write egglog using this backend, see
-the `ac`  test in `src/tests.rs`. That test demonstrates how to implement
+the [`ac`](https://github.com/ezrosent/egg-smol/blob/new-backend/core-relations/src/tests.rs#L320) test in `src/tests.rs`. That test demonstrates how to implement
 rebuilding and seminaive evaluation on top of the framework in this crate. Note
 that we have multiple non-primary-key columns for egglog functions: one holds
 the union-find id, and one holds the timestamp for the row.
@@ -144,9 +144,9 @@ The only benchmark I have right now is a basic AC benchmark: for some number
 `N`, reassociate the expression: `(+ (+ (+ ... (+ 0 1) ...) N-2) N-1)` to `(+ 0
 (+ ... (+ N-2 N-1) ...))` using the rules for associativity and commutativity of
 addition. For _N=12_ egglog takes 27.2s on my machine (M1 Mac) and this crate
-takes 17.2s. For _N=13_ egglog takes 132.95s and this crate takes 82.35s.
+takes 18s. For _N=13_ egglog takes 132.95s and this crate takes 82.35s.
 
-In both cases, the new backend is roughly 40% faster! Of course, there are a lot
+In both cases, the new backend is 35-40% faster! Of course, there are a lot
 more benchmarks to do.
 
 ## Gaps
@@ -164,12 +164,12 @@ it isn't currently present in the databse.
 
 This is sufficient for generating arbitrary terms on the right-hand side of a
 rule, but it is _not_ sufficient for observing the result of arbitrary egglog
-subcomputations within an action: in other words, merge functions may "run
+subcomputations within an action: in other words, merge functions may not "run
 immediately."
 
 This is a semantic change for egglog, but one that basically everyone I talk to
 thinks is a good idea. The last time I looked at the egglog test suite, most
-programs do not use this feature, and if they did we can rewrite queries
+programs do not rely on the current behavior, and if they did we can rewrite queries
 automatically to get these semantics back.
 
 ### Containers
@@ -185,10 +185,10 @@ And similar for `Vec-length`, etc. We do not really use the vector contents
 themselves except to dump them into a table.
 
 In other words, we can represent containers _as relations_, and relations are
-something that we already support! There's a problem though: we don't know how
+something that we already support! There's a problem though: I don't know how
 to write congruence for vectors this way. We need a way to union the ids
-associated with two vectors when all of their operands are equal. I suggest a
-new type of rule: "forall rules". We ought to be able to write:
+associated with two vectors when all of their operands are equal. One way to fix
+this is "forall rules". We ought to be able to write:
 
 ```scheme
 (rule ((Vec v1) (Vec v2)
@@ -205,10 +205,11 @@ actually be that bad: Free Join and GJ already do a lot of "iterate over all
 
 ### Proofs?
 My hope for proofs is that we can define an additional non-primary key that
-points to the root of the _proof tree_ associated with that term. Then, as
+points to the root of the proof tree associated with that term. Then, as
 before, each rule can propagate provenance for any new rows it adds by adding a
 proof node and then inserting it into the new row. Because rebuilding and
-congruence will be "just another rule", we can also add proofs there.
+congruence will be "just another rule", we can also plumb proofs through 
+there.
 
 This doesn't make proof production trivial, but it gives us more freedom in
 using native union-finds, and allowing for more information to be stored inline
