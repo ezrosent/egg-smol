@@ -41,9 +41,8 @@ Free Join planner also tries to minimize the number of stages in the final join
 plan; this concept only makes sense with Free Join as all GJ plans have as many
 stages as there are variables in the query.
 
-* We do not use a lazy trie. Instead, we keep trie levels in a common cache of
-hash tables, allowing for more memory reuse across different recursive calls
-to Free Join.
+* The structure of the code is a bit different (no explicit tries anywhere) but
+algorithmically things are similar.
 
 ### Lower-level Control
 
