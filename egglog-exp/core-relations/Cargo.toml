@@ -1,0 +1,24 @@
+[package]
+name = "core-relations"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hashbrown = { version = "0.14", features = ["raw"] }
+indexmap = "2.0"
+rustc-hash = "1.1"
+fixedbitset = "0.4"
+smallvec = "1.10"
+bumpalo = "3.12"
+thiserror = "1.0"
+anyhow = "1.0"
+lazy_static = { version = "1.4" }
+numeric-id = {path = "../numeric-id"}
+union-find = {path = "../union-find"}
+log = "0.4"
+
+[features]
+default = []
+debug-val-trace = []

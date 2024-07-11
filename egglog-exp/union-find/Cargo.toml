@@ -1,0 +1,7 @@
+[package]
+name = "union-find"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+numeric-id = { path = "../numeric-id" }
