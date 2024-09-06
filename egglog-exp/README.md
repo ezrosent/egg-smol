@@ -85,4 +85,7 @@ things can improve are:
 The `egglog-bridge` crate implements a small egglog-like language as a Rust
 library on top of `core-relations`. It exposes a builder-pattern-style API, as
 well as a macro that supports S-expression syntax.  It is currently missing
-support for lattices and containers. But it has initial support for proofs.
+support for lattices and containers. One goal of `egglog-bridge` is to support
+proofs: right now that support is mostly wired in but there is still a good
+amount of debugging to do, followed by writing a proof checker for the format
+it returns.
