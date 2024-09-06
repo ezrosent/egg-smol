@@ -18,6 +18,7 @@ lazy_static = { version = "1.4" }
 numeric-id = {path = "../numeric-id"}
 union-find = {path = "../union-find"}
 log = "0.4"
+petgraph = "0.6.5"
 
 [features]
 default = []

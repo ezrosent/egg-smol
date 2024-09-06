@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{
-    proof_spec::{InsertKind, Insertable, ProofBuilder},
+    proof_spec::{ProofBuilder, RebuildVars},
     ColumnTy, DefaultVal, EGraph, FunctionId, Result, RuleId, RuleInfo, Timestamp,
 };
 
@@ -34,6 +34,9 @@ enum RuleBuilderError {
 
 struct VarInfo {
     ty: ColumnTy,
+    /// If there is a "term-level" variant of this variable bound elsewhere, it
+    /// is stored here. Otherwise, this points back to the variable itself.
+    term_var: Variable,
 }
 
 #[derive(Clone, Debug)]
@@ -52,16 +55,6 @@ impl QueryEntry {
         match self {
             QueryEntry::Var { id, .. } => *id,
             QueryEntry::Const(_) => panic!("expected variable, found constant"),
-        }
-    }
-
-    pub(crate) fn render(&self) -> String {
-        match self {
-            QueryEntry::Var { name, id } => name
-                .as_ref()
-                .map(|x| x.to_string())
-                .unwrap_or_else(|| format!("v{id:?}")),
-            QueryEntry::Const(c) => format!("c{c:?}"),
         }
     }
 }
@@ -294,7 +287,8 @@ impl RuleBuilder<'_> {
 
     /// Bind a new variable of the given type in the query.
     pub fn new_var(&mut self, ty: ColumnTy) -> Variable {
-        self.query.vars.push(VarInfo { ty })
+        let res = self.query.vars.next_id();
+        self.query.vars.push(VarInfo { ty, term_var: res })
     }
 
     /// Bind a new variable of the given type in the query.
@@ -316,6 +310,13 @@ impl RuleBuilder<'_> {
             let proof_var = self.new_var(ColumnTy::Id);
             self.proof_builder.add_lhs(entries, proof_var);
             self.query.atom_proofs.push(proof_var);
+            if let Some(QueryEntry::Var { id, .. }) = entries.last() {
+                if table != self.egraph.uf_table {
+                    // Don't overwrite "term_var" for uf_table; it stores
+                    // reasons inline / doesn't have terms.
+                    self.query.vars[*id].term_var = proof_var;
+                }
+            }
             atom.push(proof_var.into());
         }
         self.query.atoms.push((table, atom));
@@ -395,59 +396,76 @@ impl RuleBuilder<'_> {
         let (res, cb): (Variable, BuildRuleCallback) = match func {
             Function::Table(func) => {
                 let info = &self.egraph.funcs[func];
-                let res = self.query.vars.push(VarInfo { ty: info.ret_ty() });
+                let res = self.query.vars.push(VarInfo {
+                    ty: info.ret_ty(),
+                    term_var: self.query.vars.next_id(),
+                });
                 let table = info.table;
                 let id_counter = self.query.id_counter;
                 (
                     res,
                     match info.default_val {
                         DefaultVal::Const(_) | DefaultVal::FreshId => {
-                            let wv: WriteVal = match &info.default_val {
-                                DefaultVal::Const(c) => (*c).into(),
-                                DefaultVal::FreshId => id_counter.into(),
+                            let (wv, wv_ref): (WriteVal, WriteVal) = match &info.default_val {
+                                DefaultVal::Const(c) => ((*c).into(), (*c).into()),
+                                DefaultVal::FreshId => (
+                                    WriteVal::IncCounter(id_counter),
+                                    // When we create a new term, we should
+                                    // simply "reuse" the value we just minted
+                                    // for the value.
+                                    WriteVal::CurrentVal(id_counter),
+                                ),
                                 _ => unreachable!(),
                             };
                             if self.egraph.tracing {
-                                let prf_wv = WriteVal::from(self.egraph.trace_counter);
-                                let prf = self.new_var(ColumnTy::Id);
+                                let term_var = self.new_var(ColumnTy::Id);
+                                self.query.vars[res].term_var = term_var;
                                 let ts_var = self.new_var(ColumnTy::Id);
+                                let reason_var = self.new_var(ColumnTy::Id);
                                 let mut insert_entries = entries.clone();
                                 insert_entries.push(res.into());
-                                let add_proof = self.proof_builder.set(
-                                    Insertable::Func(func),
+                                let add_proof = self.proof_builder.new_row(
+                                    func,
                                     insert_entries,
-                                    prf,
-                                    InsertKind::Lookup {
-                                        ts_var: ts_var.into(),
-                                    },
+                                    term_var,
+                                    reason_var,
                                     self.egraph,
                                 );
                                 Box::new(move |inner, rb| {
                                     let dst_vars = inner.convert_all(&entries);
-                                    // TODO: support projecting out multiple
-                                    // destination columns. This is pretty
-                                    // inefficient.
+                                    // NB: having one `lookup_or_insert` call
+                                    // per projection is pretty inefficient
+                                    // here, but merging these into a custom
+                                    // instruction didn't move the needle on a
+                                    // write-heavy benchmark when I tried it
+                                    // early on. May be worth revisiting after
+                                    // more low-hanging fruit has been
+                                    // optimized.
                                     let var = rb.lookup_or_insert(
                                         table,
                                         &dst_vars,
-                                        &[wv, inner.next_ts.to_value().into(), prf_wv],
+                                        &[wv, inner.next_ts.to_value().into(), wv_ref],
                                         val_col,
                                     )?;
                                     let ts = rb.lookup_or_insert(
                                         table,
                                         &dst_vars,
-                                        &[wv, inner.next_ts.to_value().into(), prf_wv],
-                                        ColumnId::from_usize(dst_vars.len() + 1),
+                                        &[wv, inner.next_ts.to_value().into(), wv_ref],
+                                        val_col.inc(),
                                     )?;
-                                    let proof = rb.lookup_or_insert(
+                                    let term = rb.lookup_or_insert(
                                         table,
                                         &dst_vars,
-                                        &[wv, inner.next_ts.to_value().into(), prf_wv],
-                                        ColumnId::from_usize(dst_vars.len() + 2),
+                                        &[wv, inner.next_ts.to_value().into(), wv_ref],
+                                        val_col.inc().inc(),
                                     )?;
-                                    inner.mapping.insert(prf, proof.into());
+                                    inner.mapping.insert(term_var, term.into());
                                     inner.mapping.insert(res, var.into());
                                     inner.mapping.insert(ts_var, ts.into());
+                                    rb.assert_eq(var.into(), term.into());
+                                    // The following bookeeping is only needed
+                                    // if the value is new. That only happens if
+                                    // the main id equals the term id.
                                     add_proof(inner, rb)?;
                                     Ok(())
                                 })
@@ -467,18 +485,18 @@ impl RuleBuilder<'_> {
                         }
                         DefaultVal::Fail => {
                             if self.egraph.tracing {
-                                let prf = self.new_var(ColumnTy::Id);
-                                self.proof_builder.add_lhs(&entries, prf);
+                                let term_var = self.new_var(ColumnTy::Id);
+                                self.proof_builder.add_lhs(&entries, term_var);
                                 Box::new(move |inner, rb| {
                                     let dst_vars = inner.convert_all(&entries);
                                     let var = rb.lookup(table, &dst_vars, val_col)?;
-                                    let proof = rb.lookup(
+                                    let term = rb.lookup(
                                         table,
                                         &dst_vars,
-                                        ColumnId::from_usize(dst_vars.len() + 2),
+                                        ColumnId::new(val_col.rep() + 1),
                                     )?;
                                     inner.mapping.insert(res, var.into());
-                                    inner.mapping.insert(prf, proof.into());
+                                    inner.mapping.insert(term_var, term.into());
                                     Ok(())
                                 })
                             } else {
@@ -497,6 +515,7 @@ impl RuleBuilder<'_> {
                 let ret = self.egraph.db.primitives().get_schema(p).ret;
                 let res = self.query.vars.push(VarInfo {
                     ty: ColumnTy::Primitive(ret),
+                    term_var: self.query.vars.next_id(),
                 });
                 (
                     res,
@@ -514,21 +533,24 @@ impl RuleBuilder<'_> {
     }
 
     /// Merge the two values in the union-find.
-    pub fn union(&mut self, l: QueryEntry, r: QueryEntry) {
+    pub fn union(&mut self, mut l: QueryEntry, mut r: QueryEntry) {
         let cb: BuildRuleCallback = if self.query.tracing {
-            let proof_var = self.new_var(ColumnTy::Id);
-            let add_proof = self.proof_builder.set(
-                Insertable::UnionFind,
-                [l.clone(), r.clone()].to_vec(),
-                proof_var,
-                InsertKind::Insert,
-                self.egraph,
-            );
+            // Union proofs should reflect term-level variables rather than the
+            // current leader of the e-class.
+            for entry in [&mut l, &mut r] {
+                if let QueryEntry::Var { id, .. } = entry {
+                    *id = self.query.vars[*id].term_var;
+                }
+            }
+            let reason_var = self.new_var(ColumnTy::Id);
+            let add_proof = self
+                .proof_builder
+                .union(l.clone(), r.clone(), reason_var, self.egraph);
             Box::new(move |inner, rb| {
                 let l = inner.convert(&l);
                 let r = inner.convert(&r);
                 add_proof(inner, rb)?;
-                let proof = inner.mapping[proof_var];
+                let proof = inner.mapping[reason_var];
                 rb.insert(
                     inner.uf_table,
                     &[l, r, inner.next_ts.to_value().into(), proof],
@@ -567,17 +589,44 @@ impl RuleBuilder<'_> {
             return;
         }
         let table = self.egraph.funcs[func].table;
-        let proof_var = self.new_var(ColumnTy::Id);
-        let add_proof =
-            self.proof_builder
-                .rebuild_proof(func, before, after, proof_var, self.egraph);
+        let term_var = self.new_var(ColumnTy::Id);
+        let reason_var = self.new_var(ColumnTy::Id);
+        let before_id = before.last().unwrap().var();
+        let before_term = self.query.vars[before_id].term_var;
+        debug_assert_ne!(before_term, before_id);
+        let add_proof = self.proof_builder.rebuild_proof(
+            func,
+            after,
+            RebuildVars {
+                before_term,
+                new_term: term_var,
+                reason: reason_var,
+            },
+            self.egraph,
+        );
         let after = SmallVec::<[_; 4]>::from_iter(after.iter().cloned());
+        let uf_table = self.query.uf_table;
         self.query.add_rule.push(Box::new(move |inner, rb| {
             add_proof(inner, rb)?;
             let mut dst_vars = inner.convert_all(&after);
+            let after_id = *dst_vars.last().unwrap();
             dst_vars.push(inner.next_ts.to_value().into());
-            dst_vars.push(inner.mapping[proof_var]);
-            rb.insert(table, &dst_vars).context("rebuild_row")
+            dst_vars.push(inner.mapping[term_var]);
+            // This congruence rule will also serve as a proof that the old and
+            // new terms are equal.
+            rb.insert(
+                uf_table,
+                &[
+                    // Interestingly, this fails, but using after_id works. Is
+                    // before_term wrong?
+                    inner.mapping[before_term],
+                    inner.mapping[term_var],
+                    inner.next_ts.to_value().into(),
+                    inner.mapping[reason_var],
+                ],
+            )
+            .context("rebuild_row_uf")?;
+            rb.insert(table, &dst_vars).context("rebuild_row_table")
         }));
     }
 
@@ -585,30 +634,16 @@ impl RuleBuilder<'_> {
     pub fn set(&mut self, func: FunctionId, entries: &[QueryEntry]) {
         let table = self.egraph.funcs[func].table;
         let entries = entries.to_vec();
-        let cb: BuildRuleCallback = if self.egraph.tracing {
-            let proof_var = self.new_var(ColumnTy::Id);
-            let add_proof = self.proof_builder.set(
-                Insertable::Func(func),
-                entries.to_vec(),
-                proof_var,
-                InsertKind::Insert,
-                self.egraph,
-            );
-            Box::new(move |inner, rb| {
-                add_proof(inner, rb)?;
-                let mut dst_vars = inner.convert_all(&entries);
-                dst_vars.push(inner.next_ts.to_value().into());
-                dst_vars.push(inner.mapping[proof_var]);
-                rb.insert(table, &dst_vars).context("set")
-            })
+        if self.egraph.tracing {
+            let res = self.lookup(Function::Table(func), &entries[0..entries.len() - 1]);
+            self.union(res.into(), entries.last().unwrap().clone());
         } else {
-            Box::new(move |inner, rb| {
+            self.query.add_rule.push(Box::new(move |inner, rb| {
                 let mut dst_vars = inner.convert_all(&entries);
                 dst_vars.push(inner.next_ts.to_value().into());
                 rb.insert(table, &dst_vars).context("set")
-            })
+            }));
         };
-        self.query.add_rule.push(cb);
     }
 
     /// Remove the value of a function from the database.

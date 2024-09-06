@@ -182,6 +182,10 @@ mod context {
     impl ContextHandle {
         #[inline(always)]
         pub fn new(_: impl Into<String>) -> ContextHandle {
+            ContextHandle::empty()
+        }
+
+        pub const fn empty() -> ContextHandle {
             ContextHandle
         }
     }
@@ -203,6 +207,9 @@ mod context {
             let handle = ContextHandle(map.len());
             map.insert(handle, Context::new(message));
             handle
+        }
+        pub const fn empty() -> ContextHandle {
+            ContextHandle(!0)
         }
     }
 
@@ -297,6 +304,14 @@ macro_rules! define_id {
 
             $v fn new(id: $repr) -> Self {
                 Self::with_context(id, "")
+            }
+
+            #[allow(unused)]
+            $v const fn new_const(id: $repr) -> Self {
+                $name {
+                    rep: id,
+                    context: $crate::ContextHandle::empty(),
+                }
             }
 
             #[allow(unused)]

@@ -8,7 +8,7 @@
 //! of core egglog functionality, but it does not implement algorithms for
 //! joins, union-finds, etc.
 
-use std::{cell::RefCell, iter::once, rc::Rc, time::Instant};
+use std::{cell::RefCell, iter, rc::Rc, time::Instant};
 
 use core_relations::{
     ColumnId, Constraint, CounterId, Database, DisplacedTable, DisplacedTableWithProvenance,
@@ -17,18 +17,18 @@ use core_relations::{
 };
 use indexmap::{map::Entry, IndexMap};
 use numeric_id::{define_id, DenseIdMap, NumericId};
-use proof_dag::RowProof;
-use proof_spec::{cong_row, get_row_proof, ProofSpec, ProofSpecId};
+use proof_spec::{ProofReason, ProofReconstructionState, ReasonSpecId};
 use smallvec::SmallVec;
 
 pub mod macros;
-pub(crate) mod proof_dag;
 pub(crate) mod proof_spec;
 pub(crate) mod rule;
+pub(crate) mod term_proof_dag;
 #[cfg(test)]
 mod tests;
 
 pub use rule::{Function, QueryEntry, RuleBuilder};
+use term_proof_dag::TermProof;
 use thiserror::Error;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -51,14 +51,16 @@ pub struct EGraph {
     db: Database,
     uf_table: TableId,
     id_counter: CounterId,
-    trace_counter: CounterId,
+    reason_counter: CounterId,
+    cong_id_spec: ReasonSpecId,
     next_ts: Timestamp,
     rules: DenseIdMap<RuleId, RuleInfo>,
     funcs: DenseIdMap<FunctionId, FunctionInfo>,
-    proof_specs: DenseIdMap<ProofSpecId, Rc<ProofSpec>>,
+    proof_specs: DenseIdMap<ReasonSpecId, Rc<ProofReason>>,
     /// Side tables used to store proof information. We initialize these lazily
     /// as a proof object with a given number of parameters is added.
-    trace_tables: IndexMap<usize /* arity */, TableId>,
+    reason_tables: IndexMap<usize /* arity */, TableId>,
+    term_tables: IndexMap<usize /* arity */, TableId>,
     side_channel: Rc<RefCell<Option<Vec<Value>>>>,
     get_first_id: ExternalFunctionId,
     tracing: bool,
@@ -94,16 +96,20 @@ impl EGraph {
             side_channel: side_channel.clone(),
         };
         let get_first_id = db.add_external_function(get_first);
+        let mut proof_specs: DenseIdMap<ReasonSpecId, Rc<ProofReason>> = Default::default();
+        let cong_id_spec = proof_specs.push(Rc::new(ProofReason::CongId));
         Self {
             db,
             uf_table,
             id_counter,
-            trace_counter,
+            reason_counter: trace_counter,
+            cong_id_spec,
             next_ts: Timestamp::new(1),
             rules: Default::default(),
             funcs: Default::default(),
-            proof_specs: Default::default(),
-            trace_tables: Default::default(),
+            proof_specs,
+            reason_tables: Default::default(),
+            term_tables: Default::default(),
             side_channel,
             get_first_id,
             tracing,
@@ -136,21 +142,38 @@ impl EGraph {
         row.map(|row| row.vals[1]).unwrap_or(val)
     }
 
-    fn trace_table(&mut self, arity: usize) -> TableId {
-        match self.trace_tables.entry(arity) {
+    fn term_table(&mut self, table: TableId) -> TableId {
+        let spec = self.db.get_table(table).spec();
+        match self.term_tables.entry(spec.n_keys) {
             Entry::Occupied(o) => *o.get(),
             Entry::Vacant(v) => {
                 let table = SortedWritesTable::new(
-                    arity,
-                    arity + 1,
+                    spec.n_keys + 1,     // added entry for the tableid
+                    spec.n_keys + 1 + 2, // one value for the term id, one for the reason,
                     None,
                     |_, _, _, _| false,
                     self.db.pool_set(),
                 );
-
                 let table_id = self.db.add_table(table);
-                v.insert(table_id);
-                table_id
+                *v.insert(table_id)
+            }
+        }
+    }
+
+    fn reason_table(&mut self, spec: &ProofReason) -> TableId {
+        let arity = spec.arity();
+        match self.reason_tables.entry(arity) {
+            Entry::Occupied(o) => *o.get(),
+            Entry::Vacant(v) => {
+                let table = SortedWritesTable::new(
+                    arity,
+                    arity + 1, // one value for the reason id
+                    None,
+                    |_, _, _, _| false,
+                    self.db.pool_set(),
+                );
+                let table_id = self.db.add_table(table);
+                *v.insert(table_id)
             }
         }
     }
@@ -165,6 +188,73 @@ impl EGraph {
     /// incrementing the timestamp.
     pub fn add_values(&mut self, values: impl IntoIterator<Item = (FunctionId, Vec<Value>)>) {
         self.add_values_with_desc("", values)
+    }
+
+    /// A term-oriented means of adding data to the database: hand back a "term
+    /// id" for the given function and keys for the function. Proofs for this
+    /// term will include `desc`.
+    ///
+    /// # Panics
+    /// This method panics if the values do not match the arity of the function.
+    pub fn add_term(&mut self, func: FunctionId, inputs: &[Value], desc: &str) -> Value {
+        let mut extended_row = Vec::new();
+        extended_row.extend_from_slice(inputs);
+        let res = if self.tracing {
+            let reason = self.get_fiat_reason(desc);
+            let term = self.get_term(func, inputs, reason);
+            extended_row.push(term);
+            extended_row.push(self.next_ts.to_value());
+            extended_row.push(term);
+            term
+        } else {
+            let id = Value::from_usize(self.db.inc_counter(self.id_counter));
+            extended_row.push(id);
+            extended_row.push(self.next_ts.to_value());
+            id
+        };
+        let table_id = self.funcs[func].table;
+        let table = self.db.get_table_mut(table_id);
+        table.stage_insert(&extended_row);
+        self.db.merge_all();
+        self.next_ts = self.next_ts.inc();
+        self.rebuild().unwrap();
+        res
+    }
+
+    /// Get an id corresponding to the given term, inserting the value into the
+    /// corresponding terms table if it isn't there.
+    ///
+    /// This method is really only relevant when tracing is enabled.
+    fn get_term(&mut self, func: FunctionId, key: &[Value], reason: Value) -> Value {
+        let table_id = self.funcs[func].table;
+        let term_table_id = self.term_table(table_id);
+        let table = self.db.get_table(term_table_id);
+        let mut term_key = Vec::with_capacity(key.len() + 1);
+        term_key.push(Value::new(func.rep()));
+        term_key.extend(key);
+        if let Some(row) = table.get_row(&term_key, self.db.pool_set()) {
+            row.vals[row.vals.len() - 2]
+        } else {
+            let result = Value::from_usize(self.db.inc_counter(self.id_counter));
+            term_key.push(result);
+            term_key.push(reason);
+            self.db.get_table_mut(term_table_id).stage_insert(&term_key);
+            self.db.merge_table(term_table_id);
+            let please_remove = eprintln!("adding term {term_key:?} to {term_table_id:?}");
+            result
+        }
+    }
+
+    fn get_fiat_reason(&mut self, desc: &str) -> Value {
+        let reason = Rc::new(ProofReason::Fiat { desc: desc.into() });
+        let reason_table = self.reason_table(&reason);
+        let reason_spec_id = self.proof_specs.push(reason);
+        let reason_id = Value::from_usize(self.db.inc_counter(self.reason_counter));
+        self.db
+            .get_table_mut(reason_table)
+            .stage_insert(&[Value::new(reason_spec_id.rep()), reason_id]);
+        self.db.merge_table(reason_table);
+        reason_id
     }
 
     /// Load the given values into the database. If tracing is enabled, the
@@ -182,37 +272,29 @@ impl EGraph {
         values: impl IntoIterator<Item = (FunctionId, Vec<Value>)>,
     ) {
         let mut extended_row = SmallVec::<[Value; 8]>::new();
+        let reason_id = if self.tracing {
+            Some(self.get_fiat_reason(desc))
+        } else {
+            None
+        };
         for (func, row) in values.into_iter() {
-            let table_info = &self.funcs[func];
-            let table_id = table_info.table;
-            let proof_spec: Option<ProofSpec> = if self.tracing {
-                Some(ProofSpec::Fiat {
-                    func,
-                    arity: table_info.schema.len(),
-                    desc: desc.into(),
-                })
-            } else {
-                None
-            };
-            let proof_id = proof_spec.map(|proof_spec| {
-                let trace_table = self.trace_table(proof_spec.arity());
-                let spec_id = self.proof_specs.push(proof_spec.into());
-                extended_row.push(Value::new(spec_id.rep()));
-                extended_row.extend_from_slice(&row);
-                let proof_id = Value::from_usize(self.db.inc_counter(self.trace_counter));
-                extended_row.push(proof_id);
-                let table = self.db.get_table_mut(trace_table);
-                table.stage_insert(&extended_row);
-                extended_row.clear();
-                proof_id
-            });
-            let table = self.db.get_table_mut(table_id);
             extended_row.extend_from_slice(&row);
             extended_row.push(self.next_ts.to_value());
-            if let Some(proof) = proof_id {
-                extended_row.push(proof);
+            let table_info = &self.funcs[func];
+            let table_id = table_info.table;
+            if let Some(reason_id) = reason_id {
+                // Get the term id itself
+                let term_id = self.get_term(func, &row[0..row.len() - 2], reason_id);
+                // Then union it with the value being set for this term.
+                self.db.get_table_mut(self.uf_table).stage_insert(&[
+                    row[row.len() - 2],
+                    term_id,
+                    self.next_ts.to_value(),
+                    reason_id,
+                ]);
+                extended_row.push(term_id);
             }
-            table.stage_insert(&extended_row);
+            self.db.get_table_mut(table_id).stage_insert(&extended_row);
             extended_row.clear();
         }
         self.db.merge_all();
@@ -230,7 +312,7 @@ impl EGraph {
             .len(self.db.pool_set())
     }
 
-    /// Generate a proof explaining why a given row is in the database.
+    /// Generate a proof explaining why a given term is in the database.
     ///
     /// # Errors
     /// This method will return an error if tracing is not enabled, or if the row is not in the database.
@@ -238,14 +320,7 @@ impl EGraph {
     /// # Panics
     /// This method may panic if `key` does not match the arity of the function,
     /// or is otherwise malformed.
-    pub fn explain_row(&mut self, func: FunctionId, key: &[Value]) -> Result<Rc<RowProof>> {
-        #[derive(Error, Debug)]
-        enum ProofReconstructionError {
-            #[error("attempting to explain a row without tracing enabled. Try constructing with `EGraph::with_tracing`")]
-            TracingNotEnabled,
-            #[error("attempting to construct a proof for a row that is not in the database")]
-            RowNotFound,
-        }
+    pub fn explain_term(&mut self, func: FunctionId, key: &[Value]) -> Result<Rc<TermProof>> {
         if !self.tracing {
             return Err(ProofReconstructionError::TracingNotEnabled.into());
         }
@@ -255,8 +330,9 @@ impl EGraph {
             return Err(ProofReconstructionError::RowNotFound.into());
         };
         // No error case here: there shouldn't be any nullary tables.
-        let proof = *row.vals.last().unwrap();
-        Ok(get_row_proof(proof, self, &mut Default::default()))
+        let term_id = *row.vals.last().unwrap();
+        let please_remove = eprintln!("row to explain={:?}", row.vals);
+        Ok(self.explain_term_inner(term_id, &mut ProofReconstructionState::default()))
     }
 
     /// Read the contents of the given function.
@@ -300,23 +376,10 @@ impl EGraph {
         let uf_table = self.uf_table;
         let tracing = self.tracing;
 
-        // This is a bit of a hack. We need to get the trace table before we
-        // actually know next_table_id. If we call next_table_id too early, it
-        // will be wrong.
-        let trace_table = self.trace_table(
-            ProofSpec::Cong {
-                func: FunctionId::new(!0),
-                arity: schema.len(),
-            }
-            .arity(),
-        );
-        let proof_ctr = self.trace_counter;
+        let reason_ctr = self.reason_counter;
+        let cong_id_spec = self.cong_id_spec;
+        let reason_table = self.reason_table(&ProofReason::CongId);
         let next_func_id = self.funcs.next_id();
-        let cong_spec = ProofSpec::Cong {
-            func: next_func_id,
-            arity: schema.len(),
-        };
-        let proof_id = self.proof_specs.push(cong_spec.into());
         let table = match merge {
             MergeFn::UnionId => SortedWritesTable::new(
                 n_args,
@@ -328,14 +391,16 @@ impl EGraph {
                     let next_ts = new[n_args + 1];
                     if l != r {
                         if tracing {
-                            let cong_row = cong_row(proof_id, n_args, cur, new);
+                            let l_term = cur.last().unwrap();
+                            let r_term = new.last().unwrap();
+                            assert_eq!(l_term, r_term);
                             let res = state.predict_val(
-                                trace_table,
-                                &cong_row,
-                                once(MergeVal::Counter(proof_ctr)),
+                                reason_table,
+                                &[Value::new(cong_id_spec.rep()), *l_term],
+                                iter::once(MergeVal::Counter(reason_ctr)),
                             );
-                            let proof_val = *res.last().unwrap();
-                            state.stage_insert(uf_table, &[l, r, next_ts, proof_val]);
+                            let reason_val = *res.last().unwrap();
+                            state.stage_insert(uf_table, &[l, r, next_ts, reason_val]);
                         } else {
                             state.stage_insert(uf_table, &[l, r, next_ts]);
                         }
@@ -370,23 +435,7 @@ impl EGraph {
                         // API, which is only safe because we do not allow "raw
                         // primitives" in return position here.
                         let res = if tracing {
-                            let cong_row = cong_row(proof_id, n_args, cur, new);
-                            let res = state.predict_val(
-                                trace_table,
-                                &cong_row,
-                                once(MergeVal::Counter(proof_ctr)),
-                            );
-                            let proof_val = *res.last().unwrap();
-                            state.predict_val(
-                                merge_table,
-                                &[l, r],
-                                [
-                                    MergeVal::from(id_counter),
-                                    MergeVal::from(next_ts),
-                                    MergeVal::from(proof_val),
-                                ]
-                                .into_iter(),
-                            )
+                            panic!("proofs aren't supported for non-union merge functions")
                         } else {
                             state.predict_val(
                                 merge_table,
@@ -667,4 +716,12 @@ impl ExternalFunction for GetFirstMatch {
         *self.side_channel.borrow_mut() = Some(args.to_vec());
         Some(Value::new(0))
     }
+}
+
+#[derive(Error, Debug)]
+enum ProofReconstructionError {
+    #[error("attempting to explain a row without tracing enabled. Try constructing with `EGraph::with_tracing`")]
+    TracingNotEnabled,
+    #[error("attempting to construct a proof for a row that is not in the database")]
+    RowNotFound,
 }

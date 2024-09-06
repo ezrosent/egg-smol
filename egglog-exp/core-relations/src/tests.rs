@@ -319,7 +319,7 @@ fn minimal_ac() {
             add,
             &[x.into(), y.into()],
             &[
-                WriteVal::Counter(id_counter),
+                WriteVal::IncCounter(id_counter),
                 WriteVal::QueryEntry(v(2).into()),
             ],
             ColumnId::new(2),
@@ -487,7 +487,7 @@ fn ac_test(strat: PlanStrategy) {
                     add,
                     &[x.into(), y.into()],
                     &[
-                        WriteVal::Counter(id_counter),
+                        WriteVal::IncCounter(id_counter),
                         WriteVal::QueryEntry(next_ts.into()),
                     ],
                     ColumnId::new(2),

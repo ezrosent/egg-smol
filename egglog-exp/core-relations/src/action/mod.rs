@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::{
     common::{HashMap, Value},
-    free_join::{inc_counter, CounterId, Database, TableId, Variable},
+    free_join::{cur_val, inc_counter, CounterId, Database, TableId, Variable},
     pool::{PoolSet, Pooled},
     primitives::PrimitiveFunctionId,
     table_spec::ColumnId,
@@ -50,7 +50,9 @@ pub enum WriteVal {
     /// A variable or a constant.
     QueryEntry(QueryEntry),
     /// A fresh value from the given counter.
-    Counter(CounterId),
+    IncCounter(CounterId),
+    /// The current value from the given counter.
+    CurrentVal(CounterId),
 }
 
 impl<T> From<T> for WriteVal
@@ -64,7 +66,7 @@ where
 
 impl From<CounterId> for WriteVal {
     fn from(ctr: CounterId) -> Self {
-        WriteVal::Counter(ctr)
+        WriteVal::IncCounter(ctr)
     }
 }
 
@@ -152,6 +154,12 @@ impl<'a> ExecutionState<'a> {
             }
         }
         ever_changed
+    }
+
+    pub(crate) fn merge_table(&mut self, table: TableId) {
+        let mut info = self.db.tables.take(table);
+        let _table_changed = info.table.merge(self);
+        self.db.tables.insert(table, info);
     }
 
     pub fn stage_insert(&mut self, table: TableId, vals: &[Value]) {
@@ -260,6 +268,9 @@ impl<'a> ExecutionState<'a> {
                 let pool = pool_set.get_pool::<Vec<Value>>().clone();
                 let mut table = self.db.tables.get_mut(*table_id).unwrap().table_mut();
                 let mut out = pool.get();
+
+                // TODO: we may want to vectorize this one better: do a round of
+                // lookups, then for ones that failed, do a round of inserts.
                 iter_entries!(pool, args).fill_vec(&mut out, Value::stale, |offset, key| {
                     // First, check if the entry is already in the table:
                     if let Some(row) = table.get_row_column(&key, *dst_col, pool_set) {
@@ -291,8 +302,11 @@ impl<'a> ExecutionState<'a> {
                                     WriteVal::QueryEntry(QueryEntry::Var(v)) => {
                                         bindings[*v][offset]
                                     }
-                                    WriteVal::Counter(ctr) => {
+                                    WriteVal::IncCounter(ctr) => {
                                         Value::from_usize(inc_counter(ctrs, *ctr))
+                                    }
+                                    WriteVal::CurrentVal(ctr) => {
+                                        Value::from_usize(cur_val(ctrs, *ctr))
                                     }
                                 })
                             }

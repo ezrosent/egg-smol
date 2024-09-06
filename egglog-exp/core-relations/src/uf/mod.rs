@@ -4,6 +4,7 @@ use std::{any::Any, cell::RefCell, mem};
 
 use indexmap::IndexMap;
 use numeric_id::{DenseIdMap, NumericId};
+use petgraph::{algo::dijkstra, graph::NodeIndex, visit::EdgeRef, Direction, Graph};
 
 use crate::{
     action::ExecutionState,
@@ -302,15 +303,35 @@ pub struct DisplacedTableWithProvenance {
     /// that x = y".
     ///
     /// N.B. We currently only use the first proof that we find. The remaining
-    /// proofs are used for debugging, and hopefully eventually also to generate
-    /// smaller proofs.
+    /// proofs are used for debugging. With some further refactoring we should
+    /// be able to remove this field entirely, as complete proof information is
+    /// now available through `proof_graph`.
     context: HashMap<(Value, Value), IndexSet<Value>>,
+    proof_graph: Graph<Value, ProofEdge>,
+    node_map: HashMap<Value, NodeIndex>,
     /// The value that was displaced, the value _immediately_ displacing it.
+    /// NB: this is different from the 'displaced' table in 'base', which holds
+    /// a timestamp.
     displaced: Vec<(Value, Value)>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum ProofStep {
+#[derive(Copy, Clone, Eq, PartialEq)]
+struct ProofEdge {
+    reason: ProofReason,
+    ts: Value,
+}
+
+// TODO: endpoints.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofStep {
+    pub lhs: Value,
+    pub rhs: Value,
+    pub reason: ProofReason,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ProofReason {
     Forward(Value),
     Backward(Value),
 }
@@ -328,15 +349,15 @@ impl DisplacedTableWithProvenance {
         eval_constraint(&self.expand(row), constraint)
     }
 
-    /// A simple proof generation algorithm, based on "Proof-Producing
-    /// Congruence Closure" by Nieuwenhuis and Oliveras. If the two values are
-    /// not equal, this method returns `None`.
+    /// Return the timestamp when `l` and `r` became equal.
     ///
-    /// We want to make this a lot more sophisticated eventually; this is a
-    /// simple implementation that can produce very long proofs.
-    pub fn get_proof(&self, l: Value, r: Value) -> Option<Vec<ProofStep>> {
+    /// This is used to filter possible paths in the proof graph. The algorithm
+    /// we use here is a variant of the classic algorithm in "Proof-Producing
+    /// Congruence Closure" by Nieuwenhuis and Oliveras for reconstructing a
+    /// proof.
+    fn timestamp_when_equal(&self, l: Value, r: Value) -> Option<u32> {
         if l == r {
-            return Some(vec![]);
+            return Some(0);
         }
         let mut l_proofs = IndexMap::new();
         let mut r_proofs = IndexMap::new();
@@ -374,9 +395,10 @@ impl DisplacedTableWithProvenance {
             while cur != canon {
                 // Find where cur became non-canonical.
                 let row = *self.base.lookup_table.get(&cur).unwrap();
+                let (_, ts) = self.base.displaced[row.index()];
                 let (child, parent) = self.displaced[row.index()];
-                let proof = *self.context[&(child, parent)].get_index(0).unwrap();
-                steps.insert(parent, proof);
+                debug_assert_eq!(child, cur);
+                steps.insert(parent, ts);
                 cur = parent;
             }
         }
@@ -400,35 +422,82 @@ impl DisplacedTableWithProvenance {
             }
         }
         match (l_end, r_start) {
-            (None, Some(start)) => Some(
-                r_proofs.as_slice()[..=start]
-                    .iter()
-                    .rev()
-                    .map(|(_, proof)| ProofStep::Backward(*proof))
-                    .collect(),
-            ),
-            (Some(end), None) => Some(
-                l_proofs.as_slice()[..=end]
-                    .iter()
-                    .map(|(_, proof)| ProofStep::Forward(*proof))
-                    .collect(),
-            ),
-            (Some(end), Some(start)) => Some(
-                l_proofs.as_slice()[..=end]
-                    .iter()
-                    .map(|(_, proof)| ProofStep::Forward(*proof))
-                    .chain(
-                        r_proofs.as_slice()[..=start]
-                            .iter()
-                            .rev()
-                            .map(|(_, proof)| ProofStep::Backward(*proof)),
-                    )
-                    .collect(),
-            ),
+            (None, Some(start)) => r_proofs.as_slice()[..=start]
+                .iter()
+                .map(|(_, ts)| ts.rep())
+                .max(),
+            (Some(end), None) => l_proofs.as_slice()[..=end]
+                .iter()
+                .map(|(_, ts)| ts.rep())
+                .max(),
+            (Some(end), Some(start)) => l_proofs.as_slice()[..=end]
+                .iter()
+                .map(|(_, ts)| ts.rep())
+                .chain(r_proofs.as_slice()[..=start].iter().map(|(_, ts)| ts.rep()))
+                .max(),
             (None, None) => {
                 panic!("did not find common id, despite the values being equivalent {l:?} / {r:?}, l_proofs={l_proofs:?}, r_proofs={r_proofs:?}")
             }
         }
+    }
+
+    /// A simple proof generation algorithm that searches for the shortest path
+    /// in the proof graph between `l` and `r`.
+    ///
+    /// The path in the graph is restricted to the timestamps at or before `l`
+    /// and `r` first became equal. This is to avoid cycles during proof
+    /// reconstruction.
+    pub fn get_proof(&self, l: Value, r: Value) -> Option<Vec<ProofStep>> {
+        let ts = self.timestamp_when_equal(l, r)?;
+        let start = self.node_map[&l];
+        let goal = self.node_map[&r];
+        let costs = dijkstra(&self.proof_graph, self.node_map[&l], Some(goal), |edge| {
+            if edge.weight().ts.rep() > ts {
+                // avoid edges added after the two became equal.
+                f64::INFINITY
+            } else {
+                1.0f64
+            }
+        });
+        // Reconstruct the proof steps from the cost map returned from petgraph.
+        // Start at the end and then work backwards along the shortest path.
+        let mut path = Vec::new();
+        let mut cur = goal;
+        while cur != start {
+            let (_, step, next) = self
+                .proof_graph
+                .edges_directed(cur, Direction::Incoming)
+                .map(|edge| {
+                    let source = edge.source();
+                    let cost = costs[&source];
+                    let step = ProofStep {
+                        lhs: *self.proof_graph.node_weight(source).unwrap(),
+                        rhs: *self.proof_graph.node_weight(edge.target()).unwrap(),
+                        reason: edge.weight().reason,
+                    };
+                    (cost, step, source)
+                })
+                .fold(None, |acc, cur| {
+                    // Manually implement 'min' because we are using f64 for costs.
+                    // We should probably switch these edge costs over to NotNan
+                    // or a custom type.
+                    let Some(acc) = acc else {
+                        return Some(cur);
+                    };
+                    Some(if acc.0 > cur.0 { cur } else { acc })
+                })
+                .unwrap();
+            path.push(step);
+            cur = next;
+        }
+        path.reverse();
+        Some(path)
+    }
+    fn get_or_create_node(&mut self, val: Value) -> NodeIndex {
+        *self
+            .node_map
+            .entry(val)
+            .or_insert_with(|| self.proof_graph.add_node(val))
     }
 }
 
@@ -474,21 +543,39 @@ impl Table for DisplacedTableWithProvenance {
         }
     }
     fn stage_insert(&mut self, row: &[Value]) {
-        let [a, b, c, d] = row else {
+        let [a, b, ts, reason] = row else {
             panic!("invalid arity for row: {row:?} (expected 4)")
         };
-        match self.base.insert_impl(&[*a, *b, *c]) {
+        match self.base.insert_impl(&[*a, *b, *ts]) {
             Some((parent, child)) => {
-                // NB: parent and child may not be `a` or `b`. We are currently
-                // treaing `d` as though it just _is_ a proof the `a` equals `b`,
-                // but we may need some way of tacking on a proof that `a`
-                // equals parent, etc.
                 self.displaced.push((child, parent));
-                self.context.entry((child, parent)).or_default().insert(*d);
+                self.context
+                    .entry((child, parent))
+                    .or_default()
+                    .insert(*reason);
                 self.base.changed = true;
+
+                let a_node = self.get_or_create_node(*a);
+                let b_node = self.get_or_create_node(*b);
+                self.proof_graph.add_edge(
+                    a_node,
+                    b_node,
+                    ProofEdge {
+                        reason: ProofReason::Forward(*reason),
+                        ts: *ts,
+                    },
+                );
+                self.proof_graph.add_edge(
+                    b_node,
+                    a_node,
+                    ProofEdge {
+                        reason: ProofReason::Backward(*reason),
+                        ts: *ts,
+                    },
+                );
             }
             None => {
-                self.context.entry((*a, *b)).or_default().insert(*d);
+                self.context.entry((*a, *b)).or_default().insert(*reason);
                 // We don't register a change, even if we learned a new proof.
                 // We may want to change this behavior in order to search for
                 // smaller proofs.

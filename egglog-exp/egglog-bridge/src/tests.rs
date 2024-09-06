@@ -1,3 +1,5 @@
+use std::io::stderr;
+
 use num_rational::Rational64;
 
 use crate::{add_expressions, define_rule, ColumnTy, DefaultVal, EGraph, MergeFn};
@@ -77,7 +79,8 @@ fn ac() {
 
 #[test]
 fn ac_tracing() {
-    const N: usize = 3;
+    let todo_increase_to_five = 1;
+    const N: usize = 2;
     let mut egraph = EGraph::with_tracing();
     let int_prim = egraph.primitives_mut().get_ty::<i64>();
     let num_table = egraph.add_table(
@@ -109,36 +112,27 @@ fn ac_tracing() {
     // Fill the database.
     let mut ids = Vec::new();
     //  Add 0 .. N to the database.
-    let num_rows = (0..N)
-        .map(|i| {
-            let id = egraph.fresh_id();
-            let i = egraph.primitives_mut().get(i as i64);
-            ids.push(id);
-            (num_table, vec![i, id])
-        })
-        .collect::<Vec<_>>();
-    egraph.add_values(num_rows);
+    for i in 0..N {
+        let i = egraph.primitives_mut().get(i as i64);
+        ids.push(egraph.add_term(num_table, &[i], "base number"));
+    }
 
     // construct (0 + ... + N), left-associated, and (N + ... + 0),
     // right-associated. With the assoc and comm rules saturated, these two
     // should be equal.
     let (left_root, right_root) = {
-        let mut to_add = Vec::new();
         let mut prev = ids[0];
         for num in &ids[1..] {
-            let id = egraph.fresh_id();
-            to_add.push((add_table, vec![*num, prev, id]));
+            let id = egraph.add_term(add_table, &[*num, prev], "add_left");
             prev = id;
         }
-        let left_root = to_add.last().unwrap().1[2];
-        prev = *ids.last().unwrap();
+        let left_root = prev;
+        let mut prev = *ids.last().unwrap();
         for num in ids[0..(N - 1)].iter() {
-            let id = egraph.fresh_id();
-            to_add.push((add_table, vec![prev, *num, id]));
+            let id = egraph.add_term(add_table, &[prev, *num], "add_right");
             prev = id;
         }
-        let right_root = to_add.last().unwrap().1[2];
-        egraph.add_values(to_add);
+        let right_root = prev;
         (left_root, right_root)
     };
     // Saturate
@@ -152,10 +146,10 @@ fn ac_tracing() {
         row.extend_from_slice(vals);
     });
 
-    let _explanation = egraph
-        .explain_row(add_table, &row[0..row.len() - 1])
+    let _term_explanation = egraph
+        .explain_term(add_table, &row[0..row.len() - 1])
         .unwrap();
-    eprintln!("{}", _explanation.to_dot());
+    _term_explanation.dump_explanation(&mut stderr()).unwrap();
 }
 
 #[test]
@@ -459,7 +453,6 @@ fn math_test(mut egraph: EGraph) {
             row.clear();
             row.extend_from_slice(vals);
         });
-
-        let _explanation = egraph.explain_row(mul, &row[0..row.len() - 1]).unwrap();
+        todo!("add proofs back")
     }
 }

@@ -4,6 +4,7 @@
 //! eventually make this better (e.g. with ranks, etc.) but for now this works
 //! well enough.
 use numeric_id::NumericId;
+use std::cmp;
 
 #[cfg(test)]
 mod tests;
@@ -47,9 +48,17 @@ impl<Value: NumericId> UnionFind<Value> {
         let a = self.find(a);
         let b = self.find(b);
         if a != b {
-            self.parents[a.index()] = b;
+            // TODO: probably want to do union-by-rank here. We need a rule that
+            // avoids spurious changes to the database when we create a new id
+            // only to immediately union it with a preexisting e-class, at which
+            // point things get deduped.
+            let parent = cmp::min(a, b);
+            let child = cmp::max(a, b);
+            self.parents[child.index()] = parent;
+            (parent, child)
+        } else {
+            (a, a)
         }
-        (b, a)
     }
 
     /// Find the representative of an equivalence class.

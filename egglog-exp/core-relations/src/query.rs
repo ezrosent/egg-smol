@@ -329,7 +329,7 @@ impl<'outer, 'a> RuleBuilder<'outer, 'a> {
         self.qb
             .mark_used(default_vals.iter().filter_map(|x| match x {
                 WriteVal::QueryEntry(qe) => Some(qe),
-                WriteVal::Counter(_) => None,
+                WriteVal::IncCounter(_) | WriteVal::CurrentVal(_) => None,
             }));
         Ok(res)
     }

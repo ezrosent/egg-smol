@@ -194,6 +194,10 @@ pub(crate) fn inc_counter(
     res
 }
 
+pub(crate) fn cur_val(counters: &DenseIdMap<CounterId, usize>, counter_id: CounterId) -> usize {
+    *counters.get(counter_id).expect("counter must exist")
+}
+
 impl Database {
     /// Create an empty Database.
     pub fn new() -> Database {
@@ -295,6 +299,21 @@ impl Database {
             predicted: &mut predicted,
         };
         exec_state.merge_all();
+    }
+
+    /// A low-level helper for merging pending updates to a particular function.
+    ///
+    /// Callers should prefer `merge_all`, as the process of merging the data
+    /// for a particular table may cause other updates to be buffered
+    /// elesewhere. The `merge_all` method runs merges to a fixed point to avoid
+    /// surprises here.
+    pub fn merge_table(&mut self, table: TableId) {
+        let mut predicted = PredictedVals::default();
+        let mut exec_state = ExecutionState {
+            db: self,
+            predicted: &mut predicted,
+        };
+        exec_state.merge_table(table);
     }
 
     /// Increment the given counter and return its previous value.

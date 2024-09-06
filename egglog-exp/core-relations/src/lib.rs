@@ -36,4 +36,4 @@ pub use table::SortedWritesTable;
 pub use table_spec::{
     ColumnId, Constraint, Offset, Row, Table, TableSpec, TableVersion, WrappedTable,
 };
-pub use uf::{DisplacedTable, DisplacedTableWithProvenance, ProofStep};
+pub use uf::{DisplacedTable, DisplacedTableWithProvenance, ProofReason, ProofStep};

@@ -4,6 +4,7 @@ use crate::{
     common::Value,
     pool::PoolSet,
     table_spec::{ColumnId, Constraint, Table},
+    uf::ProofReason,
     DisplacedTableWithProvenance, ProofStep,
 };
 
@@ -79,5 +80,19 @@ fn displaced_proof() {
     d.merge(&mut e);
 
     let proof = d.get_proof(v(0), v(3)).unwrap();
-    assert_eq!(proof, vec![ProofStep::Forward(p1), ProofStep::Backward(p3)])
+    assert_eq!(
+        proof,
+        vec![
+            ProofStep {
+                lhs: v(0),
+                rhs: v(2),
+                reason: ProofReason::Backward(p3),
+            },
+            ProofStep {
+                lhs: v(2),
+                rhs: v(3),
+                reason: ProofReason::Forward(p2),
+            },
+        ]
+    )
 }
