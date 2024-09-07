@@ -30,10 +30,7 @@ pub(crate) enum ProofReason {
     // Congrence reasons contain the "old" term id that the new term is equal
     // to. Pairwise equalty proofs are rebuilt at proof reconstruction time.
     CongRow,
-    // An identity proof. Used to store a (redundant) proof that a term is equal
-    // to itself.
-    CongId,
-    //
+    // A row that was created with no added justification (e.g. base values).
     Fiat { desc: Rc<str> },
 }
 
@@ -57,7 +54,7 @@ impl ProofReason {
         // All start with a proof spec id.
         1 + match self {
             ProofReason::Rule(RuleData { lhs_atoms, .. }) => lhs_atoms.len(),
-            ProofReason::CongRow | ProofReason::CongId => 1,
+            ProofReason::CongRow => 1,
             ProofReason::Fiat { .. } => 0,
         }
     }
@@ -211,7 +208,7 @@ impl ProofBuilder {
         let make_reason = self.make_reason(Insertable::Func(func), &entries, reason_var, db);
         let func_table = db.funcs[func].table;
         let term_table = db.term_table(func_table);
-        let func_val = Value::new(func_table.rep());
+        let func_val = Value::new(func.rep());
         move |inner, rb| {
             make_reason(inner, rb)?;
             let mut translated = Vec::new();
@@ -220,12 +217,7 @@ impl ProofBuilder {
                 translated.push(inner.convert(entry));
             }
             translated.push(inner.mapping[term_var]);
-            // Need to rework the term table building here. It's off. Want to
-            // generate it with lookup_or_insert always, requires some
-            // knot-tying.
-            let todo_remove = 1;
-            // translated.push(inner.mapping[reason_var]);
-            translated.push(Value::new(10101010).into());
+            translated.push(inner.mapping[reason_var]);
             rb.insert(term_table, &translated)?;
             Ok(())
         }
@@ -300,9 +292,6 @@ impl EGraph {
                 self.create_rule_proof(data, &term_row[1..term_row.len() - 2], &reason_row, state)
             }
             ProofReason::CongRow => self.create_cong_proof(reason_row[1], term_id, state),
-            ProofReason::CongId => {
-                panic!("CongId is being used as the proof that a term exists (id={term_id:?}); it is really just a proof that two terms are equal")
-            }
             ProofReason::Fiat { desc } => {
                 let info = &self.funcs[FunctionId::new(term_row[0].rep())];
                 let schema = info.schema.clone();
@@ -485,12 +474,6 @@ impl EGraph {
                 let proof = self.create_cong_proof(l, r, state);
                 state.base(proof)
             }
-            ProofReason::CongId => {
-                assert_eq!(reason_row[1], l);
-                // Maybe this _shouldn't_ happen.
-                let term_proof = self.explain_term_inner(reason_row[1], state);
-                state.id(term_proof)
-            }
             ProofReason::Fiat { .. } => {
                 // NB: we could add this if we wanted to.
                 panic!("fiat reason being used to explain equality, rather than a row's existence")
@@ -544,17 +527,6 @@ impl EGraph {
             let Some((keys, table)) = self.term_tables.get_index(cur) else {
                 panic!("failed to find term with id {term_id:?}")
             };
-            {
-                let ps = self.db.pool_set();
-                let table_ = self.db.get_table(*table);
-                let subset = table_.all(ps);
-                let rows = table_.scan(subset.as_ref(), ps);
-                for (_, row) in rows.iter() {
-                    // Problem 1: We aren't finding term 4
-                    // Problem 2: There are two term '2's [are we putting them in the wrong order]?
-                    let please_remmove = eprintln!("[table {table:?}] row={row:?}");
-                }
-            }
             let mut rsb = self.db.new_rule_set();
             let mut qb = rsb.new_query();
             for _ in 0..*keys + 1 {

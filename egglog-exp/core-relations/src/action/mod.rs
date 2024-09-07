@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::{
     common::{HashMap, Value},
-    free_join::{cur_val, inc_counter, CounterId, Database, TableId, Variable},
+    free_join::{inc_counter, CounterId, Database, TableId, Variable},
     pool::{PoolSet, Pooled},
     primitives::PrimitiveFunctionId,
     table_spec::ColumnId,
@@ -51,8 +51,8 @@ pub enum WriteVal {
     QueryEntry(QueryEntry),
     /// A fresh value from the given counter.
     IncCounter(CounterId),
-    /// The current value from the given counter.
-    CurrentVal(CounterId),
+    /// The value of the current row index.
+    CurrentVal(usize),
 }
 
 impl<T> From<T> for WriteVal
@@ -297,7 +297,7 @@ impl<'a> ExecutionState<'a> {
                             let row_mut = Rc::get_mut(&mut row).unwrap();
                             row_mut.reserve(default.len());
                             for val in default {
-                                row_mut.push(match val {
+                                let val = match val {
                                     WriteVal::QueryEntry(QueryEntry::Const(c)) => *c,
                                     WriteVal::QueryEntry(QueryEntry::Var(v)) => {
                                         bindings[*v][offset]
@@ -305,10 +305,9 @@ impl<'a> ExecutionState<'a> {
                                     WriteVal::IncCounter(ctr) => {
                                         Value::from_usize(inc_counter(ctrs, *ctr))
                                     }
-                                    WriteVal::CurrentVal(ctr) => {
-                                        Value::from_usize(cur_val(ctrs, *ctr))
-                                    }
-                                })
+                                    WriteVal::CurrentVal(ix) => row_mut[*ix],
+                                };
+                                row_mut.push(val)
                             }
                             // Insert it into the table.
                             table.stage_insert(&row);

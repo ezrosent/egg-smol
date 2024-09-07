@@ -8,7 +8,7 @@
 //! of core egglog functionality, but it does not implement algorithms for
 //! joins, union-finds, etc.
 
-use std::{cell::RefCell, iter, rc::Rc, time::Instant};
+use std::{cell::RefCell, rc::Rc, time::Instant};
 
 use core_relations::{
     ColumnId, Constraint, CounterId, Database, DisplacedTable, DisplacedTableWithProvenance,
@@ -52,7 +52,6 @@ pub struct EGraph {
     uf_table: TableId,
     id_counter: CounterId,
     reason_counter: CounterId,
-    cong_id_spec: ReasonSpecId,
     next_ts: Timestamp,
     rules: DenseIdMap<RuleId, RuleInfo>,
     funcs: DenseIdMap<FunctionId, FunctionInfo>,
@@ -96,18 +95,15 @@ impl EGraph {
             side_channel: side_channel.clone(),
         };
         let get_first_id = db.add_external_function(get_first);
-        let mut proof_specs: DenseIdMap<ReasonSpecId, Rc<ProofReason>> = Default::default();
-        let cong_id_spec = proof_specs.push(Rc::new(ProofReason::CongId));
         Self {
             db,
             uf_table,
             id_counter,
             reason_counter: trace_counter,
-            cong_id_spec,
             next_ts: Timestamp::new(1),
             rules: Default::default(),
             funcs: Default::default(),
-            proof_specs,
+            proof_specs: Default::default(),
             reason_tables: Default::default(),
             term_tables: Default::default(),
             side_channel,
@@ -240,7 +236,6 @@ impl EGraph {
             term_key.push(reason);
             self.db.get_table_mut(term_table_id).stage_insert(&term_key);
             self.db.merge_table(term_table_id);
-            let please_remove = eprintln!("adding term {term_key:?} to {term_table_id:?}");
             result
         }
     }
@@ -331,7 +326,6 @@ impl EGraph {
         };
         // No error case here: there shouldn't be any nullary tables.
         let term_id = *row.vals.last().unwrap();
-        let please_remove = eprintln!("row to explain={:?}", row.vals);
         Ok(self.explain_term_inner(term_id, &mut ProofReconstructionState::default()))
     }
 
@@ -375,10 +369,6 @@ impl EGraph {
         };
         let uf_table = self.uf_table;
         let tracing = self.tracing;
-
-        let reason_ctr = self.reason_counter;
-        let cong_id_spec = self.cong_id_spec;
-        let reason_table = self.reason_table(&ProofReason::CongId);
         let next_func_id = self.funcs.next_id();
         let table = match merge {
             MergeFn::UnionId => SortedWritesTable::new(
@@ -391,16 +381,8 @@ impl EGraph {
                     let next_ts = new[n_args + 1];
                     if l != r {
                         if tracing {
-                            let l_term = cur.last().unwrap();
-                            let r_term = new.last().unwrap();
-                            assert_eq!(l_term, r_term);
-                            let res = state.predict_val(
-                                reason_table,
-                                &[Value::new(cong_id_spec.rep()), *l_term],
-                                iter::once(MergeVal::Counter(reason_ctr)),
-                            );
-                            let reason_val = *res.last().unwrap();
-                            state.stage_insert(uf_table, &[l, r, next_ts, reason_val]);
+                            // These are the same term. They are already equal
+                            // and we can just do nothing.
                         } else {
                             state.stage_insert(uf_table, &[l, r, next_ts]);
                         }

@@ -194,10 +194,6 @@ pub(crate) fn inc_counter(
     res
 }
 
-pub(crate) fn cur_val(counters: &DenseIdMap<CounterId, usize>, counter_id: CounterId) -> usize {
-    *counters.get(counter_id).expect("counter must exist")
-}
-
 impl Database {
     /// Create an empty Database.
     pub fn new() -> Database {

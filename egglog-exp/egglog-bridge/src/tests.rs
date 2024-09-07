@@ -79,8 +79,7 @@ fn ac() {
 
 #[test]
 fn ac_tracing() {
-    let todo_increase_to_five = 1;
-    const N: usize = 2;
+    const N: usize = 5;
     let mut egraph = EGraph::with_tracing();
     let int_prim = egraph.primitives_mut().get_ty::<i64>();
     let num_table = egraph.add_table(

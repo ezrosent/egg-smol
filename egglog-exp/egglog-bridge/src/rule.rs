@@ -413,7 +413,7 @@ impl RuleBuilder<'_> {
                                     // When we create a new term, we should
                                     // simply "reuse" the value we just minted
                                     // for the value.
-                                    WriteVal::CurrentVal(id_counter),
+                                    WriteVal::CurrentVal(val_col.index()),
                                 ),
                                 _ => unreachable!(),
                             };
@@ -609,7 +609,6 @@ impl RuleBuilder<'_> {
         self.query.add_rule.push(Box::new(move |inner, rb| {
             add_proof(inner, rb)?;
             let mut dst_vars = inner.convert_all(&after);
-            let after_id = *dst_vars.last().unwrap();
             dst_vars.push(inner.next_ts.to_value().into());
             dst_vars.push(inner.mapping[term_var]);
             // This congruence rule will also serve as a proof that the old and
@@ -617,8 +616,6 @@ impl RuleBuilder<'_> {
             rb.insert(
                 uf_table,
                 &[
-                    // Interestingly, this fails, but using after_id works. Is
-                    // before_term wrong?
                     inner.mapping[before_term],
                     inner.mapping[term_var],
                     inner.next_ts.to_value().into(),
